@@ -34,6 +34,13 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
         gtk_window_unmaximize(GTK_WINDOW(app->window));
         gtk_window_resize(GTK_WINDOW(app->window), 760, 360);
     }
+    
+    GtkStyleContext *ctx = gtk_widget_get_style_context(app->window);
+    if (ops && ops->visual_transparent)
+        gtk_style_context_add_class(ctx, "osk-transparent");
+    else
+        gtk_style_context_remove_class(ctx, "osk-transparent");
+    
     /* 任何布局都不抢焦点 */
     gtk_window_set_accept_focus(GTK_WINDOW(app->window), FALSE);
     gtk_window_set_focus_on_map(GTK_WINDOW(app->window), FALSE);
@@ -103,6 +110,21 @@ int main(int argc, char **argv) {
     "}"
     ".osk-label-main  { font-size: 13px; }"
     ".osk-label-shift { font-size: 9px; color: #aaa; }"
+    "window.osk-transparent { background-color: rgba(0,0,0,0); }"
+    ".osk-key.osk-transparent-key {"
+    "  background-color: transparent;"
+    "  border: 1px solid rgba(255, 255, 255, 0.45);"
+    "  border-radius: 6px;"
+    "}"
+    ".osk-key.osk-transparent-key .osk-label-main {"
+    "  color: #ffffff;"
+    "  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);"
+    "}"
+    ".osk-key.osk-transparent-key .osk-label-shift,"
+    ".osk-key.osk-transparent-key .osk-label-up {"
+    "  color: #dddddd;"
+    "  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);"
+    "}"
     ".osk-label-up    { font-size: 9px; color: #aaa; }";
     
     GtkCssProvider *css_provider = gtk_css_provider_new();
@@ -137,6 +159,12 @@ int main(int argc, char **argv) {
     gtk_window_set_keep_above(GTK_WINDOW(g_app.window), TRUE);
     g_signal_connect(g_app.window, "destroy",
                      G_CALLBACK(on_window_destroy), NULL);
+                     
+    GdkScreen *screen = gtk_widget_get_screen(g_app.window);
+    GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
+    if (visual && gdk_screen_is_composited(screen))
+        gtk_widget_set_visual(g_app.window, visual);
+    gtk_widget_set_app_paintable(g_app.window, TRUE);
 
     /* 外层容器 + 布局挂载点 */
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -157,6 +185,7 @@ int main(int argc, char **argv) {
         { "最简", "minimal"    },
         { "全屏", "fullscreen" },
         { "触控板", "touchpad" },
+        { "游戏", "game" },
     };
     for (gsize i = 0; i < G_N_ELEMENTS(layout_buttons); ++i) {
         GtkWidget *btn = gtk_button_new_with_label(layout_buttons[i].label);

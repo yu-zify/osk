@@ -15,6 +15,7 @@ static const LayoutOps *const *get_table(gsize *count) {
         table[n++] = layout_minimal_ops();
         table[n++] = layout_fullscreen_ops();
         table[n++] = layout_touchpad_ops();
+        table[n++] = layout_game_ops();
     }
     *count = n;
     return table;
@@ -96,9 +97,11 @@ void layout_apply_input_region(App *app, gboolean transparent) {
         return;
     }
 
-    /* 延迟到当前事件循环之后：等 GTK 完成一次布局，
-     * 窗口和按钮的 allocation 才稳定。 */
+    /* 关键改动 1：总是取消旧定时器，重新调度 */
     if (g_input_region_idle)
-        return;
-    g_input_region_idle = g_idle_add(apply_input_region_idle, app);
+        g_source_remove(g_input_region_idle);
+
+    /* 关键改动 2：用 50ms 延迟代替 idle，
+       容忍 maximize / size-allocate 之类的异步窗口变化 */
+    g_input_region_idle = g_timeout_add(50, apply_input_region_idle, app);
 }

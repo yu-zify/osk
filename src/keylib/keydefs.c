@@ -67,6 +67,10 @@ static const KeyDef builtin_keys[] = {
     K_FN("backspace", "Back",  KEY_BACKSPACE),
     K_FN("tab",       "Tab",   KEY_TAB),
     K_FN("esc",       "Esc",   KEY_ESC),
+    K_FN("up",    "↑", KEY_UP),
+    K_FN("down",  "↓", KEY_DOWN),
+    K_FN("left",  "←", KEY_LEFT),
+    K_FN("right", "→", KEY_RIGHT),
 
     /* 修饰键 */
     K_MOD("shift", "Shift", KEY_LEFTSHIFT, OSK_MOD_SHIFT),

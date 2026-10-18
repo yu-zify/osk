@@ -7,9 +7,12 @@
 typedef struct _LayoutOps {
     const char *name;
     const char *display_name;
-    gboolean    transparent;   /* TRUE：按键之间挖空，穿透到下层窗口 */
+    gboolean    transparent;          /* 输入穿透 */
+    gboolean    visual_transparent;   /* 视觉透明（窗口背景透明） */
     GtkWidget *(*create)(App *app);
 } LayoutOps;
+
+const LayoutOps *layout_game_ops(void);   /* 新增 */
 
 const LayoutOps *layout_lookup(const char *name);
 

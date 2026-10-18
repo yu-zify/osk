@@ -21,7 +21,8 @@ executable('osk',
     'src/layout/layout_standard.c',
     'src/layout/layout_minimal.c',
     'src/layout/layout_fullscreen.c',
-    'src/layout/layout_touchpad.c',         # 新增
+    'src/layout/layout_touchpad.c',
+    'src/layout/layout_game.c',         # 新增
   ],
   include_directories: inc,
   dependencies: [gtk_dep],

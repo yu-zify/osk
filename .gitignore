@@ -26,3 +26,6 @@ target/
 # 日志
 *.log
 logs/
+
+# 备份
+*.bak
