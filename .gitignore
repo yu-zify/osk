@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# 构建产物
+dist/
+build/
+target/
+*.class
+*.o
+
+# 环境与密钥
+.env
+.env.*
+*.pem
+*.key
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 日志
+*.log
+logs/
