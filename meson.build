@@ -1,18 +1,21 @@
 project('osk', 'c',
   default_options: ['c_std=c11', 'warning_level=2'])
+  
+cc = meson.get_compiler('c')
 
 add_project_arguments('-D_GNU_SOURCE', language: 'c')
 
 inc = include_directories('src')
 
 gtk_dep = dependency('gtk+-3.0')
+m_dep = cc.find_library('m', required: true)
 
 executable('osk',
   sources: [
     'src/main.c',
     'src/app.c',
     'src/backend/uinput_keyboard.c',
-    'src/backend/uinput_touchpad.c',        # 新增
+    'src/backend/uinput_mouse.c',        # 新增
     'src/keylib/keydefs.c',
     'src/widgets/keybutton.c',
     'src/widgets/touchpad.c',               # 新增
@@ -25,5 +28,5 @@ executable('osk',
     'src/layout/layout_game.c',         # 新增
   ],
   include_directories: inc,
-  dependencies: [gtk_dep],
+  dependencies: [gtk_dep,m_dep],
   install: false)

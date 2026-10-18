@@ -5,7 +5,7 @@
 #include "backend/uinput_keyboard.h"
 #include "keylib/key.h"
 #include "widgets/keybutton.h"
-#include "backend/uinput_touchpad.h"
+#include "backend/uinput_mouse.h"
 
 /* 前向声明，避免循环包含 */
 typedef struct _LayoutOps LayoutOps;
@@ -13,7 +13,7 @@ typedef struct _LayoutOps LayoutOps;
 typedef struct {
     /* 输入后端 */
     OskKeyboard *kbd;
-    OskTouchpad *touchpad;
+    OskMouse *mouse;
     /* 修饰键状态 */
     gboolean shift, ctrl, alt, meta, caps;
 

@@ -83,8 +83,8 @@ static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     (void)widget; (void)user_data;
     osk_keyboard_free(g_app.kbd);
     g_app.kbd = NULL;
-    osk_touchpad_free(g_app.touchpad); 
-    g_app.touchpad = NULL;
+    osk_mouse_free(g_app.mouse);
+    g_app.mouse = NULL;
     if (g_app.key_buttons) {
         g_ptr_array_free(g_app.key_buttons, TRUE);
         g_app.key_buttons = NULL;
@@ -143,12 +143,11 @@ int main(int argc, char **argv) {
         g_clear_error(&error);
         return 1;
     }
-    g_app.touchpad = osk_touchpad_new("/dev/uinput", 4096, 4096, &error);
-    if (!g_app.touchpad) {
-       g_printerr("[OSK] 触控板初始化失败：%s（键盘不受影响）\n",
-                   error->message);
-       g_clear_error(&error);
-      /* 触控板失败不算致命，继续 */
+    g_app.mouse = osk_mouse_new("/dev/uinput", &error);
+    if (!g_app.mouse) {
+        g_printerr("[OSK] 鼠标初始化失败：%s（键盘不受影响）\n",
+                    error->message);
+        g_clear_error(&error);
     }
 
     g_app.key_buttons = g_ptr_array_new();
