@@ -1,9 +1,6 @@
 #include "touchpad.h"
-#include <math.h>
 
 #define MAX_TOUCHES        10
-#define TAP_TIMEOUT_MS     250
-#define TAP_DIST_PX        12.0
 #define LONG_PRESS_DRAG_MS 500
 #define DRAG_CANCEL_PX     8.0
 #define SENSITIVITY        1.0
@@ -13,7 +10,6 @@ typedef struct {
     guintptr id;
     gdouble  last_x, last_y;
     gdouble  start_x, start_y;
-    guint64  down_time_us;
     gboolean active;
 } TouchPoint;
 
@@ -28,14 +24,11 @@ struct _TouchpadWidget {
     gboolean has_mid;
 
     gdouble  scroll_accum_x, scroll_accum_y;
-    gdouble accum_x, accum_y; 
+    gdouble  accum_x, accum_y;
 
-    /* 拖动状态 */
+    /* 长按拖动（保留） */
     gboolean dragging;
     guint    drag_timer;
-
-    /* 本次手势最多几指——用于双指 tap 判定右键 */
-    gint     max_touches;
 };
 
 /* ===== 触点管理 ===== */
@@ -102,7 +95,6 @@ static gboolean on_drag_enter(gpointer data) {
     TouchpadWidget *tw = data;
     tw->drag_timer = 0;
 
-    /* 只有单指、且没进入双指状态时才进入拖动 */
     if (tw->n_active != 1 || !tw->mouse)
         return G_SOURCE_REMOVE;
 
@@ -130,16 +122,14 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
 
     switch (te->type) {
     case GDK_TOUCH_BEGIN: {
+        osk_mouse_move_rel(tw->mouse, 1, 0); 
+        osk_mouse_move_rel(tw->mouse, -1, 0);
         TouchPoint *tp = alloc_touch(tw, id);
         if (!tp) return FALSE;
         tp->last_x = tp->start_x = te->x;
         tp->last_y = tp->start_y = te->y;
-        tp->down_time_us = g_get_monotonic_time();
 
         tw->has_mid = FALSE;
-
-        if (tw->max_touches < tw->n_active)
-            tw->max_touches = tw->n_active;
 
         if (tw->n_active == 1) {
             cancel_drag_timer(tw);
@@ -172,15 +162,11 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
             gdouble dy = my - tw->last_mid_y;
 
             if (tw->dragging) {
-                /* 拖动状态：只有单指，走光标 */
-                if (tw->n_active == 1) {
+                if (tw->n_active == 1)
                     emit_move(tw, dx, dy);
-                }
             } else if (tw->n_active == 1) {
-                /* 普通单指：移动光标 */
                 emit_move(tw, dx, dy);
             } else if (tw->n_active == 2) {
-                /* 双指滚动 */
                 tw->scroll_accum_x += dx / SCROLL_SENSITIVITY;
                 tw->scroll_accum_y += dy / SCROLL_SENSITIVITY;
 
@@ -193,7 +179,6 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 }
             }
         }
-        /* 关键：这两个必须在 if (has_mid) 外面，每帧都更新 */
         tw->last_mid_x = mx;
         tw->last_mid_y = my;
         tw->has_mid = TRUE;
@@ -206,30 +191,15 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
 
         cancel_drag_timer(tw);
 
-        guint64 dt_us = g_get_monotonic_time() - tp->down_time_us;
-        gdouble ddx = te->x - tp->start_x;
-        gdouble ddy = te->y - tp->start_y;
-        gdouble dist2 = ddx * ddx + ddy * ddy;
-
-        gboolean is_tap = (dt_us < (guint64)TAP_TIMEOUT_MS * 1000 &&
-                           dist2 < TAP_DIST_PX * TAP_DIST_PX);
-
         gboolean was_last = (tw->n_active == 1);
 
         if (was_last) {
+            /* 拖动结束：释放左键 */
             if (tw->dragging) {
                 osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
                 tw->dragging = FALSE;
-            } else if (is_tap) {
-                if (tw->max_touches >= 2) {
-                    osk_mouse_button(tw->mouse, BTN_RIGHT, TRUE);
-                    osk_mouse_button(tw->mouse, BTN_RIGHT, FALSE);
-                } else {
-                    osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-                    osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
-                }
             }
-            tw->max_touches = 0;
+            /* 重置累积器 */
             tw->accum_x = 0;
             tw->accum_y = 0;
             tw->scroll_accum_x = 0;
@@ -247,10 +217,7 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
 
 /* ===== 鼠标事件（桌面调试用） ===== */
 
-#define MOUSE_FAKE_ID  0xFFFFu
 static gdouble  g_mouse_last_x = 0, g_mouse_last_y = 0;
-static guint64  g_mouse_down_us = 0;
-static gdouble  g_mouse_start_x = 0, g_mouse_start_y = 0;
 static gboolean g_mouse_pressed = FALSE;
 
 static gboolean on_mouse_press(GtkWidget *w, GdkEventButton *ev, gpointer data) {
@@ -258,9 +225,8 @@ static gboolean on_mouse_press(GtkWidget *w, GdkEventButton *ev, gpointer data) 
     TouchpadWidget *tw = data;
     if (!tw->mouse || ev->button != GDK_BUTTON_PRIMARY) return FALSE;
 
-    g_mouse_last_x = g_mouse_start_x = ev->x;
-    g_mouse_last_y = g_mouse_start_y = ev->y;
-    g_mouse_down_us = g_get_monotonic_time();
+    g_mouse_last_x = ev->x;
+    g_mouse_last_y = ev->y;
     g_mouse_pressed = TRUE;
     return TRUE;
 }
@@ -284,16 +250,6 @@ static gboolean on_mouse_release(GtkWidget *w, GdkEventButton *ev, gpointer data
     TouchpadWidget *tw = data;
     if (!tw->mouse || ev->button != GDK_BUTTON_PRIMARY) return FALSE;
 
-    guint64 dt_us = g_get_monotonic_time() - g_mouse_down_us;
-    gdouble dx = ev->x - g_mouse_start_x;
-    gdouble dy = ev->y - g_mouse_start_y;
-    gdouble dist2 = dx * dx + dy * dy;
-
-    if (dt_us < (guint64)TAP_TIMEOUT_MS * 1000 &&
-        dist2 < TAP_DIST_PX * TAP_DIST_PX) {
-        osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-        osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
-    }
     tw->accum_x = 0;
     tw->accum_y = 0;
     g_mouse_pressed = FALSE;
@@ -345,7 +301,6 @@ TouchpadWidget *touchpad_widget_new(OskMouse *mouse) {
     g_signal_connect(tw->area, "button-release-event",
                      G_CALLBACK(on_mouse_release), tw);
 
-    /* 唤醒光标 */
     if (mouse) {
         osk_mouse_move_rel(mouse, 1, 0);
         osk_mouse_move_rel(mouse, -1, 0);
