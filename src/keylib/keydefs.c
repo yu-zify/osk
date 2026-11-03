@@ -62,9 +62,9 @@ static const KeyDef builtin_keys[] = {
     K_SYM("/", "/", "?", KEY_SLASH),
 
     /* 功能键 */
-    K_FN("space",     "Space", KEY_SPACE),
-    K_FN("enter",     "Enter", KEY_ENTER),
-    K_FN("backspace", "Back",  KEY_BACKSPACE),
+    K_FN("space",     "          ␣          ", KEY_SPACE),
+    K_FN("enter",     "⏎", KEY_ENTER),
+    K_FN("backspace", "⌫",  KEY_BACKSPACE),
     K_FN("tab",       "Tab",   KEY_TAB),
     K_FN("esc",       "Esc",   KEY_ESC),
     K_FN("up",    "↑", KEY_UP),

@@ -1,15 +1,26 @@
 #include "touchpad.h"
 
-#define MAX_TOUCHES        10
-#define LONG_PRESS_DRAG_MS 500
-#define DRAG_CANCEL_PX     8.0
-#define SENSITIVITY        1.0
-#define SCROLL_SENSITIVITY 8.0
+#define MAX_TOUCHES             10
+#define TAP_TIMEOUT_MS          200   /* 单次轻点最长持续时间 */
+#define TAP_DIST_PX             8.0   /* 单次轻点最大位移 */
+#define DOUBLE_TAP_TIMEOUT_MS   350   /* 两次轻点之间的最大间隔 */
+#define DOUBLE_TAP_DIST_PX      25.0  /* 两次轻点允许的位置偏差 */
+#define DRAG_START_THRESHOLD    6.0   /* 第二下按住后移动多少进入拖动 */
+#define SENSITIVITY             1.0
+#define SCROLL_SENSITIVITY      8.0
+
+typedef enum {
+    TAP_STATE_IDLE,
+    TAP_STATE_SINGLE_WAIT,    /* 单指轻点完成，等待第二下或超时 */
+    TAP_STATE_DRAG_PENDING,   /* 第二下已按下，等待移动判定 */
+    TAP_STATE_DRAGGING,       /* 拖动中 */
+} TapState;
 
 typedef struct {
     guintptr id;
     gdouble  last_x, last_y;
     gdouble  start_x, start_y;
+    guint64  down_time_us;
     gboolean active;
 } TouchPoint;
 
@@ -26,9 +37,12 @@ struct _TouchpadWidget {
     gdouble  scroll_accum_x, scroll_accum_y;
     gdouble  accum_x, accum_y;
 
-    /* 长按拖动（保留） */
-    gboolean dragging;
-    guint    drag_timer;
+    /* 手势状态机 */
+    TapState tap_state;
+    guint    tap_timer;
+    gdouble  tap_x, tap_y;
+    gdouble  drag_start_x, drag_start_y;
+    gint     max_touches;
 };
 
 /* ===== 触点管理 ===== */
@@ -89,25 +103,17 @@ static void emit_move(TouchpadWidget *tw, gdouble dx, gdouble dy) {
     osk_mouse_move_rel(tw->mouse, ix, iy);
 }
 
-/* ===== 长按拖动 ===== */
+/* ===== 轻点超时：发左键单击 ===== */
 
-static gboolean on_drag_enter(gpointer data) {
+static gboolean on_tap_timeout(gpointer data) {
     TouchpadWidget *tw = data;
-    tw->drag_timer = 0;
-
-    if (tw->n_active != 1 || !tw->mouse)
-        return G_SOURCE_REMOVE;
-
-    osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-    tw->dragging = TRUE;
-    return G_SOURCE_REMOVE;
-}
-
-static void cancel_drag_timer(TouchpadWidget *tw) {
-    if (tw->drag_timer) {
-        g_source_remove(tw->drag_timer);
-        tw->drag_timer = 0;
+    tw->tap_timer = 0;
+    if (tw->tap_state == TAP_STATE_SINGLE_WAIT) {
+        osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
+        osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+        tw->tap_state = TAP_STATE_IDLE;
     }
+    return G_SOURCE_REMOVE;
 }
 
 /* ===== 触摸事件 ===== */
@@ -122,24 +128,49 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
 
     switch (te->type) {
     case GDK_TOUCH_BEGIN: {
-        osk_mouse_move_rel(tw->mouse, 1, 0); 
-        osk_mouse_move_rel(tw->mouse, -1, 0);
         TouchPoint *tp = alloc_touch(tw, id);
         if (!tp) return FALSE;
         tp->last_x = tp->start_x = te->x;
         tp->last_y = tp->start_y = te->y;
+        tp->down_time_us = g_get_monotonic_time();
+
+        if (tw->max_touches < tw->n_active)
+            tw->max_touches = tw->n_active;
+
+        /* 第二次点击判定 */
+        if (tw->n_active == 1 && tw->tap_state == TAP_STATE_SINGLE_WAIT) {
+            if (tw->tap_timer) {
+                g_source_remove(tw->tap_timer);
+                tw->tap_timer = 0;
+            }
+            gdouble dx = te->x - tw->tap_x;
+            gdouble dy = te->y - tw->tap_y;
+            if (dx * dx + dy * dy < DOUBLE_TAP_DIST_PX * DOUBLE_TAP_DIST_PX) {
+                /* 位置接近 → 进入拖动等待 */
+                tw->tap_state = TAP_STATE_DRAG_PENDING;
+                tw->drag_start_x = te->x;
+                tw->drag_start_y = te->y;
+            } else {
+                /* 位置太远 → 第一次的单击立刻发出 */
+                osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
+                osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+                tw->tap_state = TAP_STATE_IDLE;
+            }
+        } else if (tw->n_active == 2) {
+            /* 第二指加入 → 取消拖动意图，走双指 tap/滚动逻辑 */
+            if (tw->tap_timer) {
+                g_source_remove(tw->tap_timer);
+                tw->tap_timer = 0;
+            }
+            if (tw->tap_state == TAP_STATE_DRAG_PENDING) {
+                tw->tap_state = TAP_STATE_IDLE;
+            }
+        }
 
         tw->has_mid = FALSE;
-
-        if (tw->n_active == 1) {
-            cancel_drag_timer(tw);
-            tw->drag_timer = g_timeout_add(LONG_PRESS_DRAG_MS,
-                                            on_drag_enter, tw);
-        } else {
-            cancel_drag_timer(tw);
-        }
         break;
     }
+
     case GDK_TOUCH_UPDATE: {
         TouchPoint *tp = find_touch(tw, id);
         if (!tp) return FALSE;
@@ -147,24 +178,31 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
         tp->last_x = te->x;
         tp->last_y = te->y;
 
-        if (tw->drag_timer) {
-            gdouble ddx = tp->last_x - tp->start_x;
-            gdouble ddy = tp->last_y - tp->start_y;
-            if (ddx * ddx + ddy * ddy > DRAG_CANCEL_PX * DRAG_CANCEL_PX)
-                cancel_drag_timer(tw);
+        /* DRAG_PENDING → 移动超阈值则进入拖动 */
+        if (tw->tap_state == TAP_STATE_DRAG_PENDING) {
+            gdouble ddx = te->x - tw->drag_start_x;
+            gdouble ddy = te->y - tw->drag_start_y;
+            if (ddx * ddx + ddy * ddy > DRAG_START_THRESHOLD * DRAG_START_THRESHOLD) {
+                osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
+                tw->tap_state = TAP_STATE_DRAGGING;
+                tw->accum_x = 0;
+                tw->accum_y = 0;
+            }
         }
 
         gdouble mx, my;
-        compute_mid(tw, &mx, &my);
+        if (tw->tap_state == TAP_STATE_DRAGGING) {
+            mx = te->x;
+            my = te->y;
+        } else {
+            compute_mid(tw, &mx, &my);
+        }
 
         if (tw->has_mid) {
             gdouble dx = mx - tw->last_mid_x;
             gdouble dy = my - tw->last_mid_y;
 
-            if (tw->dragging) {
-                if (tw->n_active == 1)
-                    emit_move(tw, dx, dy);
-            } else if (tw->n_active == 1) {
+            if (tw->n_active == 1 || tw->tap_state == TAP_STATE_DRAGGING) {
                 emit_move(tw, dx, dy);
             } else if (tw->n_active == 2) {
                 tw->scroll_accum_x += dx / SCROLL_SENSITIVITY;
@@ -184,31 +222,57 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
         tw->has_mid = TRUE;
         break;
     }
+
     case GDK_TOUCH_END:
     case GDK_TOUCH_CANCEL: {
         TouchPoint *tp = find_touch(tw, id);
         if (!tp) return FALSE;
 
-        cancel_drag_timer(tw);
-
+        guint64 dt_us = g_get_monotonic_time() - tp->down_time_us;
+        gdouble ddx = te->x - tp->start_x;
+        gdouble ddy = te->y - tp->start_y;
+        gboolean is_tap = (dt_us < (guint64)TAP_TIMEOUT_MS * 1000 &&
+                           ddx * ddx + ddy * ddy < TAP_DIST_PX * TAP_DIST_PX);
         gboolean was_last = (tw->n_active == 1);
 
+        release_touch(tw, tp);
+
         if (was_last) {
-            /* 拖动结束：释放左键 */
-            if (tw->dragging) {
+            if (tw->tap_state == TAP_STATE_DRAGGING) {
+                /* 拖动结束 → 释放左键 */
                 osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
-                tw->dragging = FALSE;
+                tw->tap_state = TAP_STATE_IDLE;
+            } else if (tw->tap_state == TAP_STATE_DRAG_PENDING) {
+                /* 第二下没移动就松开 → 视为左键单击 */
+                osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
+                osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+                tw->tap_state = TAP_STATE_IDLE;
+            } else if (is_tap && tw->max_touches >= 2) {
+                /* 双指轻点 → 右键 */
+                osk_mouse_button(tw->mouse, BTN_RIGHT, TRUE);
+                osk_mouse_button(tw->mouse, BTN_RIGHT, FALSE);
+                tw->tap_state = TAP_STATE_IDLE;
+            } else if (is_tap && tw->max_touches == 1) {
+                /* 单指轻点 → 进入等待，350ms 内没第二下则发左键 */
+                tw->tap_state = TAP_STATE_SINGLE_WAIT;
+                tw->tap_x = te->x;
+                tw->tap_y = te->y;
+                tw->tap_timer = g_timeout_add(DOUBLE_TAP_TIMEOUT_MS,
+                                               on_tap_timeout, tw);
+            } else {
+                tw->tap_state = TAP_STATE_IDLE;
             }
-            /* 重置累积器 */
+
             tw->accum_x = 0;
             tw->accum_y = 0;
             tw->scroll_accum_x = 0;
             tw->scroll_accum_y = 0;
+            tw->max_touches = 0;
         }
-        release_touch(tw, tp);
         tw->has_mid = FALSE;
         break;
     }
+
     default:
         break;
     }
@@ -224,7 +288,6 @@ static gboolean on_mouse_press(GtkWidget *w, GdkEventButton *ev, gpointer data) 
     (void)w;
     TouchpadWidget *tw = data;
     if (!tw->mouse || ev->button != GDK_BUTTON_PRIMARY) return FALSE;
-
     g_mouse_last_x = ev->x;
     g_mouse_last_y = ev->y;
     g_mouse_pressed = TRUE;
@@ -235,12 +298,10 @@ static gboolean on_mouse_motion(GtkWidget *w, GdkEventMotion *ev, gpointer data)
     (void)w;
     TouchpadWidget *tw = data;
     if (!tw->mouse || !g_mouse_pressed) return FALSE;
-
     gdouble dx = ev->x - g_mouse_last_x;
     gdouble dy = ev->y - g_mouse_last_y;
     g_mouse_last_x = ev->x;
     g_mouse_last_y = ev->y;
-
     emit_move(tw, dx, dy);
     return TRUE;
 }
@@ -249,7 +310,6 @@ static gboolean on_mouse_release(GtkWidget *w, GdkEventButton *ev, gpointer data
     (void)w;
     TouchpadWidget *tw = data;
     if (!tw->mouse || ev->button != GDK_BUTTON_PRIMARY) return FALSE;
-
     tw->accum_x = 0;
     tw->accum_y = 0;
     g_mouse_pressed = FALSE;
@@ -285,6 +345,7 @@ TouchpadWidget *touchpad_widget_new(OskMouse *mouse) {
     TouchpadWidget *tw = g_new0(TouchpadWidget, 1);
     tw->mouse = mouse;
     tw->area = gtk_drawing_area_new();
+    tw->tap_state = TAP_STATE_IDLE;
 
     gtk_widget_set_can_focus(tw->area, FALSE);
     gtk_widget_add_events(tw->area,

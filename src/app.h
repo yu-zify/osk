@@ -10,24 +10,29 @@
 /* 前向声明，避免循环包含 */
 typedef struct _LayoutOps LayoutOps;
 
+typedef enum {
+    SHIFT_OFF,       /* 小写 */
+    SHIFT_ONESHOT,   /* 下一个字符大写，然后自动关闭 */
+    SHIFT_LOCKED,    /* 持续大写，直到手动关闭 */
+} ShiftState;
+
 typedef struct {
-    /* 输入后端 */
     OskKeyboard *kbd;
-    OskMouse *mouse;
-    /* 修饰键状态 */
-    gboolean shift, ctrl, alt, meta, caps;
+    OskMouse    *mouse;
 
-    /* 所有按键控件，用于批量刷新标签 */
+    ShiftState shift_state;        /* 替代原来的 gboolean shift */
+    guint      shift_click_timer;  /* 双击/三击检测定时器 */
+    gint       shift_click_count;  /* 当前连续点击计数 */
+
+    gboolean ctrl, alt, meta, caps;
+
     GPtrArray *key_buttons;
-
-    /* 修饰键按钮引用（Shift 可能有多个） */
     KeyButton *shift_btns[2];
     gsize      shift_btn_count;
     KeyButton *ctrl_btn, *alt_btn, *meta_btn, *caps_btn;
 
-    /* 窗口 + 布局挂载点 + 当前布局 */
     GtkWidget       *window;
-    GtkWidget       *layout_host;   /* GtkBox，所有布局 widget 挂这里 */
+    GtkWidget       *layout_host;
     const LayoutOps *layout;
 } App;
 

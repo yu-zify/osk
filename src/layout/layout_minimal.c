@@ -5,13 +5,13 @@ static const char *const row_1[] = {
     "q","w","e","r","t","y","u","i","o","p", NULL
 };
 static const char *const row_2[] = {
-    "a","s","d","f","g","h","j","k","l", NULL
+    "a","s","d","f","g","h","j","k","l","backspace", NULL
 };
 static const char *const row_3[] = {
-    "shift","z","x","c","v","b","n","m","backspace", NULL
+    "shift","z","x","c","v","b","n","m","up","enter", NULL
 };
 static const char *const row_4[] = {
-    "space","enter", NULL
+    "esc","ctrl","alt","space","left","down","right", NULL
 };
 
 static GtkWidget *minimal_create(App *app) {
