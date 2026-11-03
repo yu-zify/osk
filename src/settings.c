@@ -63,8 +63,8 @@ static void on_reset(GtkButton *btn, gpointer data) {
     SettingsUI *ui = data;
 
     gtk_range_set_value(GTK_RANGE(ui->scale_opacity), 1.0);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_width), 45);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_height), 50);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_width), 50);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_height), 60);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_spacing), 1);
     apply_size_from_ui(ui);
 }

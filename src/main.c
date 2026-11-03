@@ -311,12 +311,12 @@ static GtkWidget *build_toolbar(App *app) {
     app->drag_area = drag_area;
 
     /* --- 右侧：换页、home/end、设置、最小化 --- */
-    GtkWidget *right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 3);
 
     const KeyDef *page_def = keylib_get("page");
     if (page_def) {
         KeyButton *pb = key_button_new(page_def, on_page_clicked, NULL, app);
-        key_button_set_fixed_size(pb, 44, 26);
+        key_button_set_fixed_size(pb, 34, 20);
         gtk_style_context_add_class(gtk_widget_get_style_context(
                                         key_button_widget(pb)), "osk-tool");
         gtk_widget_set_tooltip_text(key_button_widget(pb), "切换第二页");
@@ -332,7 +332,7 @@ static GtkWidget *build_toolbar(App *app) {
         if (!kd) continue;
         KeyButton *kb = key_button_new(kd, app_on_key_activate,
                                        app_on_key_swipe, app);
-        key_button_set_fixed_size(kb, 44, 26);
+        key_button_set_fixed_size(kb, 34, 20);
         gtk_style_context_add_class(gtk_widget_get_style_context(
                                         key_button_widget(kb)), "osk-tool");
         gtk_widget_set_tooltip_text(key_button_widget(kb), kd->label);
@@ -368,14 +368,17 @@ static GtkWidget *build_toolbar(App *app) {
 /* ===== CSS ===== */
 
 static const char *app_css =
-    /* 键盘背景：去掉 GTK 默认的窗口内边距和边框，内容紧贴边缘 */
+    /* 窗口背景透明：空白处直接透出桌面，只有按键和按钮有底色。
+     * 需要 RGBA visual + app_paintable，main() 里已经设置。 */
     "window.osk-window {"
-    "  background-color: #23262b;"
+    "  background-color: transparent;"
+    "  background-image: none;"
     "  padding: 0;"
     "  border: none;"
     "}"
     "window.osk-window > box {"
     "  padding: 0;"
+    "  background-color: transparent;"
     "}"
     /* 关键：GTK3 给 toplevel 画了一层 decoration 节点（窗口阴影 + 圆角边框），
      * 即使 gtk_window_set_decorated(FALSE) 也照样画。这里把它整个抹掉，
@@ -398,11 +401,12 @@ static const char *app_css =
     "  box-shadow: none;"
     "  margin: 0;"
     "}"
-    /* 顶栏 */
+    /* 顶栏：背景透明，让空白处露出底色，按钮像浮在上面 */
     ".osk-toolbar {"
-    "  background-color: #2b2f36;"
-    "  padding: 5px 8px;"
-    "  border-bottom: 1px solid #3a3f47;"
+    "  background-color: transparent;"
+    "  background-image: none;"
+    "  padding: 3px 6px;"
+    "  border: none;"
     "}"
     ".osk-title {"
     "  color: #8b929c;"
@@ -438,15 +442,15 @@ static const char *app_css =
     "  color: #6b7280;"
     "}"
     ".osk-tool {"
-    "  min-height: 24px;"
-    "  min-width: 30px;"
-    "  padding: 2px 9px;"
+    "  min-height: 20px;"
+    "  min-width: 26px;"
+    "  padding: 0 6px;"
     "  border: 1px solid #454b54;"
-    "  border-radius: 6px;"
+    "  border-radius: 5px;"
     "  background-image: none;"
     "  background-color: #343943;"
     "  color: #d6dae0;"
-    "  font-size: 12px;"
+    "  font-size: 11px;"
     "  text-shadow: none;"
     "  box-shadow: none;"
     "}"
@@ -456,6 +460,13 @@ static const char *app_css =
     "}"
     ".osk-tool:active {"
     "  background-color: #2a2f38;"
+    "}"
+    /* 顶栏里用 KeyButton 实现的控件（换页、home/end）也跟着缩小 */
+    ".osk-tool.osk-key {"
+    "  border-radius: 5px;"
+    "}"
+    ".osk-tool .osk-label-main {"
+    "  font-size: 11px;"
     "}"
     /* 按键：固定尺寸、圆角、柔和阴影 */
     ".osk-key {"
@@ -542,8 +553,8 @@ int main(int argc, char **argv) {
     g_object_unref(css_provider);
 
     /* 默认外观 */
-    g_app.config.key_width   = 45;
-    g_app.config.key_height  = 50;
+    g_app.config.key_width   = 50;
+    g_app.config.key_height  = 60;
     g_app.config.key_spacing = 1;
     g_app.config.opacity     = 1.0;
 

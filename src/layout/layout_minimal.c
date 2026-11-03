@@ -18,11 +18,17 @@ static const char *const p1_row_4[] = {
 /* ===== 第二页：功能键 + 控制键 + 符号键 =====
  * 符号键复用 keylib 里已有的定义（它们本身带 Shift 形态，
  * Shift 激活时中间会显示 ! @ # 等上档符号）。 */
+static const char *const p2_row_f1[] = {
+    "f1","f2","f3","f4","f5","f6", NULL
+};
+static const char *const p2_row_f2[] = {
+    "f7","f8","f9","f10","f11","f12", NULL
+};
 static const char *const p2_row_1[] = {
     "esc","tab","backspace","enter", NULL
 };
 static const char *const p2_row_2[] = {
-    "up","down","left","right", NULL
+    "home","end","up","down","left","right", NULL
 };
 static const char *const p2_row_3[] = {
     "1","2","3","4","5","6","7","8","9","0", NULL
@@ -51,7 +57,8 @@ static GtkWidget *minimal_create(App *app) {
         p1_row_1, p1_row_2, p1_row_3, p1_row_4
     };
     static const char *const *const page2[] = {
-        p2_row_1, p2_row_2, p2_row_3, p2_row_4, p2_row_5
+        p2_row_f1, p2_row_f2, p2_row_1, p2_row_2,
+        p2_row_3, p2_row_4, p2_row_5
     };
 
     if (app->page == 1)

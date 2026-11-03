@@ -66,6 +66,20 @@ static const KeyDef builtin_keys[] = {
     K_FN("home",  "Home", KEY_HOME),
     K_FN("end",   "End",  KEY_END),
 
+    /* F1 ~ F12 */
+    K_FN("f1",  "F1",  KEY_F1),
+    K_FN("f2",  "F2",  KEY_F2),
+    K_FN("f3",  "F3",  KEY_F3),
+    K_FN("f4",  "F4",  KEY_F4),
+    K_FN("f5",  "F5",  KEY_F5),
+    K_FN("f6",  "F6",  KEY_F6),
+    K_FN("f7",  "F7",  KEY_F7),
+    K_FN("f8",  "F8",  KEY_F8),
+    K_FN("f9",  "F9",  KEY_F9),
+    K_FN("f10", "F10", KEY_F10),
+    K_FN("f11", "F11", KEY_F11),
+    K_FN("f12", "F12", KEY_F12),
+
     /* ===== 修饰键 ===== */
     K_MOD("shift", "Shift", KEY_LEFTSHIFT, OSK_MOD_SHIFT),
     K_MOD("caps",  "Caps",  KEY_CAPSLOCK,  OSK_MOD_CAPS),
