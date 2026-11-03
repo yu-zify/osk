@@ -2,14 +2,13 @@
 
 #define REPEAT_DELAY_MS     450
 #define REPEAT_INTERVAL_MS   40
-#define FIRE_DELAY_MS        40   /* 首次触发的延迟窗口，让上滑有机会取消 */
 #define SWIPE_THRESHOLD      24   /* 上滑判定阈值，像素 */
 
 struct _KeyButton {
     GtkWidget            *button;       /* GtkEventBox */
-    GtkWidget            *label_main;   /* 中间 */
-    GtkWidget            *label_shift;  /* 右上 */
-    GtkWidget            *label_up;     /* 左上 */
+    GtkWidget            *label_main;   /* 中间：主字符（随 shift/caps 变化） */
+    GtkWidget            *label_up;     /* 右上：普通状态上滑字符 */
+    GtkWidget            *label_up_s;   /* 右上：Shift 状态上滑字符 */
 
     const KeyDef         *def;
     KeyButtonActivateFunc on_activate;
@@ -19,6 +18,7 @@ struct _KeyButton {
     guint    repeat_delay;
     guint    repeat_timer;
     gboolean pressed;
+    gboolean fired;           /* 本次按下是否已经发过普通键 */
     gboolean swipe_triggered;
 };
 
@@ -26,11 +26,12 @@ static KeyButton *g_active = NULL;
 
 /* ===== 内部状态清理 ===== */
 
-void key_button_stop_repeat(KeyButton *kb) {
+static void key_button_reset(KeyButton *kb) {
     if (!kb) return;
     kb->pressed = FALSE;
     if (kb->repeat_delay) { g_source_remove(kb->repeat_delay); kb->repeat_delay = 0; }
     if (kb->repeat_timer) { g_source_remove(kb->repeat_timer); kb->repeat_timer = 0; }
+    kb->fired = FALSE;
 
     if (kb->swipe_triggered) {
         kb->swipe_triggered = FALSE;
@@ -42,29 +43,28 @@ void key_button_stop_repeat(KeyButton *kb) {
         g_active = NULL;
 }
 
-/* 创建一个标签，设置对齐、margin、CSS class 并加到 overlay */
+void key_button_stop_repeat(KeyButton *kb) {
+    key_button_reset(kb);
+}
+
+/* 创建一个叠加标签 */
 static GtkWidget *make_overlay_label(GtkOverlay *overlay,
-                                      const char *text,
                                       GtkAlign halign, GtkAlign valign,
                                       gint margin_start, gint margin_end,
                                       gint margin_top,
                                       const char *css_class) {
-    if (!text || !*text)
-        return NULL;
-
-    GtkWidget *label = gtk_label_new(text);
+    GtkWidget *label = gtk_label_new("");
     gtk_widget_set_halign(label, halign);
     gtk_widget_set_valign(label, valign);
     if (margin_start) gtk_widget_set_margin_start(label, margin_start);
     if (margin_end)   gtk_widget_set_margin_end(label, margin_end);
     if (margin_top)   gtk_widget_set_margin_top(label, margin_top);
     gtk_style_context_add_class(gtk_widget_get_style_context(label), css_class);
-
     gtk_overlay_add_overlay(overlay, label);
     return label;
 }
 
-
+/* ===== 按键重复 ===== */
 
 static gboolean repeat_tick(gpointer data) {
     KeyButton *kb = data;
@@ -81,9 +81,10 @@ static gboolean repeat_begin(gpointer data) {
     KeyButton *kb = data;
     kb->repeat_delay = 0;
     if (kb->pressed && !kb->swipe_triggered) {
-        /* 第一次视为「首次按下」，之后 repeat_tick 用 TRUE */
-        if (kb->on_activate)
+        if (kb->on_activate) {
             kb->on_activate(kb->def, FALSE, kb->user_data);
+            kb->fired = TRUE;
+        }
         kb->repeat_timer = g_timeout_add(REPEAT_INTERVAL_MS, repeat_tick, kb);
     }
     return G_SOURCE_REMOVE;
@@ -115,11 +116,10 @@ static void on_gesture_begin(GtkGesture *g, GdkEventSequence *seq,
         key_button_stop_repeat(g_active);
 
     kb->pressed         = TRUE;
-    
+    kb->fired           = FALSE;
     kb->swipe_triggered = FALSE;
     g_active            = kb;
 
-    
     kb->repeat_delay = g_timeout_add(REPEAT_DELAY_MS, repeat_begin, kb);
 }
 
@@ -128,10 +128,12 @@ static void on_gesture_end(GtkGesture *g, GdkEventSequence *seq,
     (void)g; (void)seq;
     KeyButton *kb = data;
 
-    /* 松手时如果还没触发上滑、也还没进入重复，就补发一次普通键 */
-    if (!kb->swipe_triggered && !kb->repeat_timer) {
+    /* 松手时如果这次按下还没发过普通键（既没有走重复，也没有上滑），
+     * 才补发一次普通键，避免长按重复后松手再补一次 */
+    if (!kb->swipe_triggered && !kb->fired) {
         if (kb->on_activate)
             kb->on_activate(kb->def, FALSE, kb->user_data);
+        kb->fired = TRUE;
     }
     key_button_stop_repeat(kb);
 }
@@ -144,12 +146,9 @@ static void on_gesture_cancel(GtkGesture *g, GdkEventSequence *seq,
 
 static void on_drag_update(GtkGestureDrag *g, gdouble ox, gdouble oy,
                            gpointer data) {
-   // g_print("[drag] ox=%.1f oy=%.1f pressed=%d up_code=%u\n",
-  //      ox, oy, kb->pressed, kb->def->up_code);
     (void)g;
     KeyButton *kb = data;
-g_print("[drag] ox=%.1f oy=%.1f pressed=%d up_code=%u\n",
-        ox, oy, kb->pressed, kb->def->up_code);
+
     if (!kb->pressed || kb->swipe_triggered) return;
     if (!kb->def->up_code) return;
     if (kb->repeat_timer) return;
@@ -163,7 +162,12 @@ g_print("[drag] ox=%.1f oy=%.1f pressed=%d up_code=%u\n",
 
 static void key_button_free(gpointer data) {
     KeyButton *kb = data;
-    key_button_stop_repeat(kb);
+    if (!kb) return;
+    /* 销毁过程中控件可能已在析构，只清定时器，不再操作样式 */
+    if (kb->repeat_delay) { g_source_remove(kb->repeat_delay); kb->repeat_delay = 0; }
+    if (kb->repeat_timer) { g_source_remove(kb->repeat_timer); kb->repeat_timer = 0; }
+    if (g_active == kb)
+        g_active = NULL;
     g_free(kb);
 }
 
@@ -184,21 +188,18 @@ KeyButton *key_button_new(const KeyDef *def,
     /* ---- 1. 用 EventBox 作为「按钮壳」 ---- */
     kb->button = gtk_event_box_new();
     gtk_event_box_set_visible_window(GTK_EVENT_BOX(kb->button), TRUE);
-    gtk_widget_set_hexpand(kb->button, TRUE);
-    gtk_widget_set_vexpand(kb->button, TRUE);
+    gtk_widget_set_hexpand(kb->button, FALSE);
+    gtk_widget_set_vexpand(kb->button, FALSE);
     gtk_widget_set_can_focus(kb->button, FALSE);
     gtk_widget_set_focus_on_click(kb->button, FALSE);
 
-    /* 加一个 CSS class 用于样式 */
     gtk_style_context_add_class(gtk_widget_get_style_context(kb->button),
                                  "osk-key");
 
-    /* ---- 2. 内嵌 Label ---- */
-    /* ---- 2. 用 GtkOverlay 分层放三个标签 ---- */
+    /* ---- 2. Overlay 分层：中间主字符 + 右上两个上滑角标 ---- */
     GtkWidget *overlay = gtk_overlay_new();
     gtk_container_add(GTK_CONTAINER(kb->button), overlay);
 
-    /* 中间：主值。作为 GtkOverlay 的底 child，会自动填充整个区域 */
     kb->label_main = gtk_label_new(def->label);
     gtk_widget_set_halign(kb->label_main, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(kb->label_main, GTK_ALIGN_CENTER);
@@ -206,24 +207,38 @@ KeyButton *key_button_new(const KeyDef *def,
                                "osk-label-main");
     gtk_container_add(GTK_CONTAINER(overlay), kb->label_main);
 
-    /* 右上：shift 值 */
-    kb->label_shift = make_overlay_label(GTK_OVERLAY(overlay),
-                                          def->label_shift,
-                                          GTK_ALIGN_END, GTK_ALIGN_START,
-                                          0, 3, 1,
-                                          "osk-label-shift");
+    /* 右上角：两个上滑字符并排。普通档在左，Shift 档在右。 */
+    GtkWidget *corner = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_widget_set_halign(corner, GTK_ALIGN_END);
+    gtk_widget_set_valign(corner, GTK_ALIGN_START);
+    gtk_widget_set_margin_end(corner, 4);
+    gtk_widget_set_margin_top(corner, 1);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), corner);
 
-    /* 左上：上滑值 */
-    kb->label_up = make_overlay_label(GTK_OVERLAY(overlay),
-                                    def->label_up,
-                                    GTK_ALIGN_START, GTK_ALIGN_START,
-                                      3, 0, 1,
-                                      "osk-label-up");
-    /* ---- 3. 挂手势：只用 Drag，不需要 MultiPress ---- */
+    kb->label_up = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(kb->label_up),
+                               "osk-label-up");
+    gtk_box_pack_start(GTK_BOX(corner), kb->label_up, FALSE, FALSE, 0);
+
+    kb->label_up_s = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(kb->label_up_s),
+                               "osk-label-up-shift");
+    gtk_box_pack_start(GTK_BOX(corner), kb->label_up_s, FALSE, FALSE, 0);
+
+    /* 左上角：符号键的 Shift 形态（! @ # 之类） */
+    if (def->klass == KEY_CLASS_CHAR && !def->is_letter &&
+        def->label_shift && *def->label_shift) {
+        GtkWidget *hint = make_overlay_label(GTK_OVERLAY(overlay),
+                                             GTK_ALIGN_START, GTK_ALIGN_START,
+                                             4, 0, 1,
+                                             "osk-label-hint");
+        gtk_label_set_text(GTK_LABEL(hint), def->label_shift);
+    }
+
+    /* ---- 3. 挂手势 ---- */
     GtkGesture *drag = gtk_gesture_drag_new(kb->button);
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag),
                                    GDK_BUTTON_PRIMARY);
-    /* 不设 propagation phase，默认 BUBBLE 就够；EventBox 里没有别的抢 */
     g_signal_connect(drag, "begin",       G_CALLBACK(on_gesture_begin),  kb);
     g_signal_connect(drag, "end",         G_CALLBACK(on_gesture_end),    kb);
     g_signal_connect(drag, "cancel",      G_CALLBACK(on_gesture_cancel), kb);
@@ -235,6 +250,9 @@ KeyButton *key_button_new(const KeyDef *def,
     g_object_set_data_full(G_OBJECT(kb->button), "osk-keybutton",
                            kb, key_button_free);
 
+    /* 初始化角标（构造时就知道两档符号） */
+    key_button_set_up_labels(kb, def->label_up, def->label_up_shift, FALSE);
+
     return kb;
 }
 
@@ -242,19 +260,61 @@ GtkWidget *key_button_widget(KeyButton *kb) {
     return kb ? kb->button : NULL;
 }
 
+static void set_small_label(GtkWidget *label, const char *text) {
+    if (!label) return;
+    gboolean show = text && *text;
+    gtk_label_set_text(GTK_LABEL(label), show ? text : "");
+    /* 空标签不进 show_all，避免占位；有内容时显式显示 */
+    gtk_widget_set_no_show_all(label, !show);
+    if (show)
+        gtk_widget_show(label);
+    else
+        gtk_widget_hide(label);
+}
+
 void key_button_set_label(KeyButton *kb, const char *text) {
     if (kb && kb->label_main && text)
         gtk_label_set_text(GTK_LABEL(kb->label_main), text);
 }
 
-void key_button_set_shift_label(KeyButton *kb, const char *text) {
-    if (!kb || !kb->label_shift) return;
-    gtk_label_set_text(GTK_LABEL(kb->label_shift), text ? text : "");
+void key_button_set_up_labels(KeyButton *kb,
+                              const char *up,
+                              const char *up_shift,
+                              gboolean highlight_shift) {
+    if (!kb) return;
+
+    set_small_label(kb->label_up, up);
+    set_small_label(kb->label_up_s, up_shift);
+
+    /* 两档符号同时可见，用亮度标明当前上滑会输出哪一个 */
+    GtkStyleContext *c1 = gtk_widget_get_style_context(kb->label_up);
+    GtkStyleContext *c2 = gtk_widget_get_style_context(kb->label_up_s);
+
+    gtk_style_context_remove_class(c1, "up-current");
+    gtk_style_context_remove_class(c2, "up-current");
+
+    if (highlight_shift && up_shift && *up_shift)
+        gtk_style_context_add_class(c2, "up-current");
+    else if (up && *up)
+        gtk_style_context_add_class(c1, "up-current");
 }
 
-void key_button_set_up_label(KeyButton *kb, const char *text) {
-    if (!kb || !kb->label_up) return;
-    gtk_label_set_text(GTK_LABEL(kb->label_up), text ? text : "");
+void key_button_set_fixed_size(KeyButton *kb, gint width, gint height) {
+    if (!kb) return;
+    gtk_widget_set_size_request(kb->button, width, height);
+    if (width > 0)  gtk_widget_set_hexpand(kb->button, FALSE);
+    if (height > 0) gtk_widget_set_vexpand(kb->button, FALSE);
+}
+
+void key_button_set_active_class(KeyButton *kb,
+                                 const char *class_name,
+                                 gboolean active) {
+    if (!kb || !class_name) return;
+    GtkStyleContext *ctx = gtk_widget_get_style_context(kb->button);
+    if (active)
+        gtk_style_context_add_class(ctx, class_name);
+    else
+        gtk_style_context_remove_class(ctx, class_name);
 }
 
 const KeyDef *key_button_def(const KeyButton *kb) {

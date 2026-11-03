@@ -14,18 +14,19 @@ executable('osk',
   sources: [
     'src/main.c',
     'src/app.c',
+    'src/settings.c',
     'src/backend/uinput_keyboard.c',
-    'src/backend/uinput_mouse.c',        # 新增
+    'src/backend/uinput_mouse.c',
     'src/keylib/keydefs.c',
     'src/widgets/keybutton.c',
-    'src/widgets/touchpad.c',               # 新增
+    'src/widgets/touchpad.c',
     'src/layout/layout.c',
     'src/layout/util.c',
     'src/layout/layout_standard.c',
     'src/layout/layout_minimal.c',
     'src/layout/layout_fullscreen.c',
     'src/layout/layout_touchpad.c',
-    'src/layout/layout_game.c',         # 新增
+    'src/layout/layout_game.c',
   ],
   include_directories: inc,
   dependencies: [gtk_dep,m_dep],

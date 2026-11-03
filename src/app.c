@@ -1,54 +1,47 @@
 #include "app.h"
 
-#define SHIFT_CLICK_WINDOW_MS 400   /* 双击/三击判定窗口 */
-
 static gboolean shift_active(const App *app) {
     return app->shift_state != SHIFT_OFF;
 }
 
+/* Shift 或 Caps 任一激活时，字母键显示/输入大写 */
+static gboolean want_upper(const App *app) {
+    return shift_active(app) || app->caps;
+}
 
-static void update_modifier_label(KeyButton *kb, const char *name,
+/* ===== 修饰键外观 =====
+ * 统一用按钮颜色表示激活状态，不再在按钮上显示圆点。
+ *   Shift 单次  → 蓝色 (mod-oneshot)
+ *   Shift 锁定 / Caps / Ctrl / Alt / Meta 激活 → 红色 (mod-locked)
+ */
+static void update_shift_button(KeyButton *kb, ShiftState state) {
+    if (!kb) return;
+    key_button_set_label(kb, "Shift");
+    key_button_set_active_class(kb, "mod-oneshot", state == SHIFT_ONESHOT);
+    key_button_set_active_class(kb, "mod-locked",  state == SHIFT_LOCKED);
+}
+
+static void update_plain_modifier(KeyButton *kb, const char *name,
                                    gboolean active) {
     if (!kb) return;
-    char buf[32];
-    g_snprintf(buf, sizeof(buf), active ? "● %s" : "  %s", name);
-    key_button_set_label(kb, buf);
+    key_button_set_label(kb, name);
+    key_button_set_active_class(kb, "mod-locked", active);
 }
 
-static gboolean shift_click_timeout(gpointer data) {
-    App *app = data;
-    app->shift_click_timer = 0;
-    app->shift_click_count = 0;   /* 只重置计数，状态保留 */
-    return G_SOURCE_REMOVE;
-}
+/* ===== 按键行为 ===== */
 
+/* Shift 三态循环：
+ *   点一下 → 蓝色，单次大写（输入一个字符后自动恢复）
+ *   点两下 → 红色，锁定大写
+ *   点三下 → 恢复普通颜色，回到小写
+ */
 static void on_shift_clicked(App *app) {
-    if (app->shift_click_timer) {
-        g_source_remove(app->shift_click_timer);
-        app->shift_click_timer = 0;
+    switch (app->shift_state) {
+    case SHIFT_OFF:     app->shift_state = SHIFT_ONESHOT; break;
+    case SHIFT_ONESHOT: app->shift_state = SHIFT_LOCKED;  break;
+    case SHIFT_LOCKED:
+    default:            app->shift_state = SHIFT_OFF;     break;
     }
-
-    app->shift_click_count++;
-
-    switch (app->shift_click_count) {
-    case 1:
-        app->shift_state = SHIFT_ONESHOT;
-        break;
-    case 2:
-        app->shift_state = SHIFT_LOCKED;
-        break;
-    default:
-        app->shift_state = SHIFT_OFF;
-        app->shift_click_count = 0;
-        break;
-    }
-
-    /* 状态不是 OFF 才启动窗口计时器 */
-    if (app->shift_state != SHIFT_OFF) {
-        app->shift_click_timer = g_timeout_add(SHIFT_CLICK_WINDOW_MS,
-                                                shift_click_timeout, app);
-    }
-
     app_refresh_labels(app);
 }
 
@@ -66,37 +59,67 @@ static void on_modifier_clicked(App *app, const KeyDef *def) {
     app_refresh_labels(app);
 }
 
-static const char *key_label(const KeyDef *def, const App *app) {
-    if (!def->label_shift)
-        return def->label;
-    gboolean use_shift;
-    if (def->klass == KEY_CLASS_CHAR && def->is_letter)
-        use_shift = shift_active(app) != app->caps;
-    else
-        use_shift = shift_active(app);
-    return use_shift ? def->label_shift : def->label;
+/* 主键是否需要与 Shift 一起发送 */
+static gboolean need_shift_mod(const App *app, const KeyDef *def) {
+    if (def->klass == KEY_CLASS_CHAR) {
+        if (def->is_letter) {
+            /* 字母：Shift 或 Caps 任一激活即为大写 */
+            return want_upper(app);
+        }
+        /* 数字/符号：只有 Shift 生效时才需要，Caps 不影响 */
+        return shift_active(app);
+    }
+    return shift_active(app);
 }
 
 static gsize collect_modifiers(const App *app, const KeyDef *def,
                                 unsigned short *mods) {
     gsize n = 0;
-    gboolean need_shift;
-    if (def->klass == KEY_CLASS_CHAR && def->is_letter)
-        need_shift = shift_active(app) != app->caps;
-    else
-        need_shift = shift_active(app);
 
-    if (need_shift) mods[n++] = KEY_LEFTSHIFT;
+    if (need_shift_mod(app, def)) mods[n++] = KEY_LEFTSHIFT;
     if (app->ctrl)  mods[n++] = KEY_LEFTCTRL;
     if (app->alt)   mods[n++] = KEY_LEFTALT;
     if (app->meta)  mods[n++] = KEY_LEFTMETA;
     return n;
 }
+
+/* 单次大写：用完一个字符就回到小写 */
+static void consume_oneshot(App *app) {
+    if (app->shift_state != SHIFT_ONESHOT)
+        return;
+    app->shift_state = SHIFT_OFF;
+}
+
+/* 字母键主标签随 shift/caps 切换大小写。
+ * 右上角两档上滑角标由 keybutton 维护，这里只更新高亮。 */
+static void update_char_button(App *app, KeyButton *kb) {
+    const KeyDef *def = key_button_def(kb);
+    if (!def || def->klass != KEY_CLASS_CHAR) return;
+
+    gboolean upper = want_upper(app);
+
+    if (def->is_letter && def->label_shift) {
+        key_button_set_label(kb, upper ? def->label_shift : def->label);
+        key_button_set_active_class(kb, "key-upper", upper);
+    }
+
+    /* 上滑是否走 Shift 档：字母键跟随 shift/caps，其他跟随 Shift */
+    gboolean upper_swipe = def->is_letter ? upper : shift_active(app);
+    key_button_set_up_labels(kb, def->label_up, def->label_up_shift,
+                             upper_swipe);
+}
+
 /* ===== 公共接口 ===== */
+
+void app_apply_config(App *app) {
+    if (!app || !app->window) return;
+    gtk_widget_set_opacity(app->window, app->config.opacity);
+}
 
 void app_on_key_activate(const KeyDef *def, gboolean is_repeat,
                           gpointer user_data) {
     App *app = user_data;
+    if (!app || !def) return;
 
     if (def->action == KEY_ACTION_MODIFIER) {
         if (!is_repeat)
@@ -114,17 +137,13 @@ void app_on_key_activate(const KeyDef *def, gboolean is_repeat,
     else
         g_print("[OSK] 发送 %s（%zu 个修饰键）\n", def->id, n);
 
-    /* ONESHOT 在输入一个字符/功能键后自动关闭 */
-if (app->shift_state == SHIFT_ONESHOT &&
-    (def->klass == KEY_CLASS_CHAR || def->klass == KEY_CLASS_FUNCTION)) {
-    app->shift_state = SHIFT_OFF;
-    app->shift_click_count = 0;
-    if (app->shift_click_timer) {
-        g_source_remove(app->shift_click_timer);
-        app->shift_click_timer = 0;
+    /* 输入一个字符/功能键后，单次大写自动关闭 */
+    if (def->klass == KEY_CLASS_CHAR || def->klass == KEY_CLASS_FUNCTION) {
+        if (app->shift_state == SHIFT_ONESHOT) {
+            consume_oneshot(app);
+            app_refresh_labels(app);
+        }
     }
-    app_refresh_labels(app);
-}
 }
 
 void app_register_key_button(App *app, KeyButton *kb) {
@@ -146,49 +165,60 @@ void app_register_key_button(App *app, KeyButton *kb) {
     }
 }
 
-static void update_shift_button(KeyButton *kb, ShiftState state) {
-    if (!kb) return;
-    key_button_set_label(kb, "Shift");
-
-    GtkWidget *w = key_button_widget(kb);
-    GtkStyleContext *ctx = gtk_widget_get_style_context(w);
-    gtk_style_context_remove_class(ctx, "mod-active");
-    gtk_style_context_remove_class(ctx, "mod-locked");
-
-    if (state == SHIFT_ONESHOT)
-        gtk_style_context_add_class(ctx, "mod-active");
-    else if (state == SHIFT_LOCKED)
-        gtk_style_context_add_class(ctx, "mod-locked");
-}
-
-
-    
 void app_refresh_labels(App *app) {
     if (!app) return;
 
-    /* 字符键的三个标签在 key_button_new 时就已经设好，不再变化。
-     * 只有修饰键按钮需要根据 shift/caps/ctrl/... 状态更新显示。 */
-/* 在 app_refresh_labels 里： */
-for (gsize i = 0; i < app->shift_btn_count; ++i)
-    update_shift_button(app->shift_btns[i], app->shift_state);
-    update_modifier_label(app->caps_btn, "Caps", app->caps);
-    update_modifier_label(app->ctrl_btn, "Ctrl", app->ctrl);
-    update_modifier_label(app->alt_btn,  "Alt",  app->alt);
-    update_modifier_label(app->meta_btn, "Meta", app->meta);
+    /* 字符键：主标签大小写 + 上滑角标高亮 */
+    if (app->key_buttons) {
+        for (gsize i = 0; i < app->key_buttons->len; ++i)
+            update_char_button(app, g_ptr_array_index(app->key_buttons, i));
+    }
+
+    for (gsize i = 0; i < app->shift_btn_count; ++i)
+        update_shift_button(app->shift_btns[i], app->shift_state);
+
+    update_plain_modifier(app->caps_btn, "Caps", app->caps);
+    update_plain_modifier(app->ctrl_btn, "Ctrl", app->ctrl);
+    update_plain_modifier(app->alt_btn,  "Alt",  app->alt);
+    update_plain_modifier(app->meta_btn, "Meta", app->meta);
 }
 
 void app_on_key_swipe(const KeyDef *def, gpointer user_data) {
     App *app = user_data;
-    if (!def || !def->up_code) return;
+    if (!app || !def || !def->up_code) return;
 
-    /* 上滑不叠加 Shift（上滑字符本身已经是一个明确的符号），
-     * 但保留 Ctrl/Alt/Meta。 */
+    /* 上滑输出的是明确目标字符，按当前 Shift 档位二选一：
+     *   - 普通档：label_up / up_code / up_shift
+     *   - Shift 档：label_up_shift / up_code_shift / up_shift_shift
+     * 哪一档生效和按钮右上角的高亮一致。 */
+    gboolean upper = (def->klass == KEY_CLASS_CHAR && def->is_letter)
+                     ? want_upper(app)
+                     : shift_active(app);
+
+    unsigned short code    = def->up_code;
+    gboolean       need_sh = def->up_shift;
+    const char    *label   = def->label_up;
+
+    if (upper && def->up_code_shift) {
+        code    = def->up_code_shift;
+        need_sh = def->up_shift_shift;
+        label   = def->label_up_shift;
+    }
+
     unsigned short mods[4];
     gsize n = 0;
-    if (app->ctrl) mods[n++] = KEY_LEFTCTRL;
-    if (app->alt)  mods[n++] = KEY_LEFTALT;
-    if (app->meta) mods[n++] = KEY_LEFTMETA;
+    if (need_sh)    mods[n++] = KEY_LEFTSHIFT;
+    if (app->ctrl)  mods[n++] = KEY_LEFTCTRL;
+    if (app->alt)   mods[n++] = KEY_LEFTALT;
+    if (app->meta)  mods[n++] = KEY_LEFTMETA;
 
-    osk_keyboard_chord(app->kbd, def->up_code, mods, n);
-    g_print("[OSK] 上滑 %s → 0x%X\n", def->id, def->up_code);
+    osk_keyboard_chord(app->kbd, code, mods, n);
+    g_print("[OSK] 上滑 %s → '%s'（%zu 个修饰键）\n",
+            def->id, label ? label : "?", n);
+
+    /* 上滑同样消耗单次 Shift */
+    if (app->shift_state == SHIFT_ONESHOT) {
+        consume_oneshot(app);
+        app_refresh_labels(app);
+    }
 }

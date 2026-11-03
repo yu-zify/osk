@@ -1,95 +1,133 @@
 #include "key.h"
 #include <string.h>
 
+/* 字母键：中间小写，Shift/Caps 激活时中间变大写 */
 #define K_CHAR(id, n, s, c) \
-    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, NULL, c, 0, TRUE,  0, NULL }
-#define K_CHAR_UP(id, n, s, c, u, uc) \
-    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, u,    c, uc, TRUE,  0, NULL }
+    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, NULL, NULL, c, \
+      0, FALSE, 0, FALSE, TRUE,  0, NULL }
+
+/* 字母键 + 双上滑：up 为普通上滑符号，up_s 为 Shift 上滑符号。
+ * uc / uc_s 是两个符号各自的键码；need / need_s 表示要不要叠加 Shift。 */
+#define K_CHAR_UP(id, n, s, up, up_s, c, uc, need, uc_s, need_s) \
+    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, up, up_s, c, \
+      uc, need, uc_s, need_s, TRUE,  0, NULL }
+
+/* 符号/数字键：中间主字符，Shift 形态显示在左上角 */
 #define K_SYM(id, n, s, c) \
-    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, NULL, c, 0, FALSE, 0, NULL }
-#define K_SYM_UP(id, n, s, c, u, uc) \
-    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, u,    c, uc, FALSE, 0, NULL }
+    { id, KEY_CLASS_CHAR, KEY_ACTION_EMIT, n, s, NULL, NULL, c, \
+      0, FALSE, 0, FALSE, FALSE, 0, NULL }
+
 #define K_FN(id, label, c) \
-    { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, NULL, c, 0, FALSE, 0, NULL }
+    { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, NULL, NULL, c, \
+      0, FALSE, 0, FALSE, FALSE, 0, NULL }
 #define K_MOD(id, label, c, bit) \
-    { id, KEY_CLASS_MODIFIER, KEY_ACTION_MODIFIER, label, NULL, NULL, c, 0, FALSE, bit, NULL }
+    { id, KEY_CLASS_MODIFIER, KEY_ACTION_MODIFIER, label, NULL, NULL, NULL, c, \
+      0, FALSE, 0, FALSE, FALSE, bit, NULL }
 #define K_HOLD(id, label, c) \
-    { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, NULL, c, 0, FALSE, 0, NULL }
+    { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, NULL, NULL, c, \
+      0, FALSE, 0, FALSE, FALSE, 0, NULL }
 
 static const KeyDef builtin_keys[] = {
-    /* 数字行 */
-    K_SYM("`", "`", "~", KEY_GRAVE),
-    K_SYM("1", "1", "!", KEY_1),
-    K_SYM("2", "2", "@", KEY_2),
-    K_SYM("3", "3", "#", KEY_3),
-    K_SYM("4", "4", "$", KEY_4),
-    K_SYM("5", "5", "%", KEY_5),
-    K_SYM("6", "6", "^", KEY_6),
-    K_SYM("7", "7", "&", KEY_7),
-    K_SYM("8", "8", "*", KEY_8),
-    K_SYM("9", "9", "(", KEY_9),
-    K_SYM("0", "0", ")", KEY_0),
-    K_SYM("-", "-", "_", KEY_MINUS),
-    K_SYM("=", "=", "+", KEY_EQUAL),
-    K_SYM("[", "[", "{", KEY_LEFTBRACE), 
-    K_SYM("]", "]", "}", KEY_RIGHTBRACE), 
+    /* ===== 数字行：不支持上滑，Shift 形态显示在左上角 ===== */
+    K_SYM("`",  "`", "~", KEY_GRAVE),
+    K_SYM("1",  "1", "!", KEY_1),
+    K_SYM("2",  "2", "@", KEY_2),
+    K_SYM("3",  "3", "#", KEY_3),
+    K_SYM("4",  "4", "$", KEY_4),
+    K_SYM("5",  "5", "%", KEY_5),
+    K_SYM("6",  "6", "^", KEY_6),
+    K_SYM("7",  "7", "&", KEY_7),
+    K_SYM("8",  "8", "*", KEY_8),
+    K_SYM("9",  "9", "(", KEY_9),
+    K_SYM("0",  "0", ")", KEY_0),
+    K_SYM("-",  "-", "_", KEY_MINUS),
+    K_SYM("=",  "=", "+", KEY_EQUAL),
+    K_SYM("[",  "[", "{", KEY_LEFTBRACE),
+    K_SYM("]",  "]", "}", KEY_RIGHTBRACE),
     K_SYM("\\", "\\", "|", KEY_BACKSLASH),
 
-    /* 字母行 */
-    
-
-    K_CHAR("a", "a", "A", KEY_A),
-    K_CHAR("s", "s", "S", KEY_S),
-    K_CHAR("d", "d", "D", KEY_D),
-    K_CHAR("f", "f", "F", KEY_F),
-    K_CHAR("g", "g", "G", KEY_G),
-    K_CHAR("h", "h", "H", KEY_H),
-    K_CHAR("j", "j", "J", KEY_J),
-    K_CHAR("k", "k", "K", KEY_K),
-    K_CHAR("l", "l", "L", KEY_L),
+    /* ===== 符号键 ===== */
     K_SYM(";", ";", ":", KEY_SEMICOLON),
     K_SYM("'", "'", "\"", KEY_APOSTROPHE),
-
-    K_CHAR("z", "z", "Z", KEY_Z),
-    K_CHAR("x", "x", "X", KEY_X),
-    K_CHAR("c", "c", "C", KEY_C),
-    K_CHAR("v", "v", "V", KEY_V),
-    K_CHAR("b", "b", "B", KEY_B),
-    K_CHAR("n", "n", "N", KEY_N),
-    K_CHAR("m", "m", "M", KEY_M),
     K_SYM(",", ",", "<", KEY_COMMA),
     K_SYM(".", ".", ">", KEY_DOT),
     K_SYM("/", "/", "?", KEY_SLASH),
 
-    /* 功能键 */
+    /* ===== 功能键 ===== */
     K_FN("space",     "          ␣          ", KEY_SPACE),
     K_FN("enter",     "⏎", KEY_ENTER),
     K_FN("backspace", "⌫",  KEY_BACKSPACE),
-    K_FN("tab",       "Tab",   KEY_TAB),
+    K_FN("tab",       "⇥",   KEY_TAB),
     K_FN("esc",       "Esc",   KEY_ESC),
     K_FN("up",    "↑", KEY_UP),
     K_FN("down",  "↓", KEY_DOWN),
     K_FN("left",  "←", KEY_LEFT),
     K_FN("right", "→", KEY_RIGHT),
 
-    /* 修饰键 */
+    /* ===== 修饰键 ===== */
     K_MOD("shift", "Shift", KEY_LEFTSHIFT, OSK_MOD_SHIFT),
+    K_MOD("caps",  "Caps",  KEY_CAPSLOCK,  OSK_MOD_CAPS),
     K_MOD("ctrl",  "Ctrl",  KEY_LEFTCTRL,  OSK_MOD_CTRL),
     K_MOD("alt",   "Alt",   KEY_LEFTALT,   OSK_MOD_ALT),
     K_MOD("meta",  "Meta",  KEY_LEFTMETA,  OSK_MOD_META),
-    K_MOD("caps",  "Caps",  KEY_CAPSLOCK,  OSK_MOD_CAPS),
-    
-    K_CHAR_UP("q", "q", "Q", KEY_Q, "1", KEY_1),
-    K_CHAR_UP("w", "w", "W", KEY_W, "2", KEY_2),
-    K_CHAR_UP("e", "e", "E", KEY_E, "3", KEY_3),
-    K_CHAR_UP("r", "r", "R", KEY_R, "4", KEY_4),
-    K_CHAR_UP("t", "t", "T", KEY_T, "5", KEY_5),
-    K_CHAR_UP("y", "y", "Y", KEY_Y, "6", KEY_6),
-    K_CHAR_UP("u", "u", "U", KEY_U, "7", KEY_7),
-    K_CHAR_UP("i", "i", "I", KEY_I, "8", KEY_8),
-    K_CHAR_UP("o", "o", "O", KEY_O, "9", KEY_9),
-    K_CHAR_UP("p", "p", "P", KEY_P, "0", KEY_0),
-    
+
+    /* ===== 字母：每个键一对上滑符号（普通 / Shift） =====
+     * 上排 q..p 沿用数字行：普通滑出数字，Shift 状态滑出对应的上档符号。
+     * 其余字母按物理键盘的符号键配对依次分配，所以和真实键盘一样能盲按。 */
+    K_CHAR_UP("q", "q", "Q", "1", "!", KEY_Q, KEY_1,     FALSE,
+                                             KEY_1,     TRUE),
+    K_CHAR_UP("w", "w", "W", "2", "@", KEY_W, KEY_2,     FALSE,
+                                             KEY_2,     TRUE),
+    K_CHAR_UP("e", "e", "E", "3", "#", KEY_E, KEY_3,     FALSE,
+                                             KEY_3,     TRUE),
+    K_CHAR_UP("r", "r", "R", "4", "$", KEY_R, KEY_4,     FALSE,
+                                             KEY_4,     TRUE),
+    K_CHAR_UP("t", "t", "T", "5", "%", KEY_T, KEY_5,     FALSE,
+                                             KEY_5,     TRUE),
+    K_CHAR_UP("y", "y", "Y", "6", "^", KEY_Y, KEY_6,     FALSE,
+                                             KEY_6,     TRUE),
+    K_CHAR_UP("u", "u", "U", "7", "&", KEY_U, KEY_7,     FALSE,
+                                             KEY_7,     TRUE),
+    K_CHAR_UP("i", "i", "I", "8", "*", KEY_I, KEY_8,     FALSE,
+                                             KEY_8,     TRUE),
+    K_CHAR_UP("o", "o", "O", "9", "(", KEY_O, KEY_9,     FALSE,
+                                             KEY_9,     TRUE),
+    K_CHAR_UP("p", "p", "P", "0", ")", KEY_P, KEY_0,     FALSE,
+                                             KEY_0,     TRUE),
+
+    K_CHAR_UP("a", "a", "A", "-", "_", KEY_A, KEY_MINUS,     TRUE,
+                                             KEY_MINUS,     TRUE),
+    K_CHAR_UP("s", "s", "S", "=", "+", KEY_S, KEY_EQUAL,     TRUE,
+                                             KEY_EQUAL,     TRUE),
+    K_CHAR_UP("d", "d", "D", "[", "{", KEY_D, KEY_LEFTBRACE, TRUE,
+                                             KEY_LEFTBRACE, TRUE),
+    K_CHAR_UP("f", "f", "F", "]", "}", KEY_F, KEY_RIGHTBRACE, TRUE,
+                                             KEY_RIGHTBRACE, TRUE),
+    K_CHAR_UP("g", "g", "G", "\\", "|", KEY_G, KEY_BACKSLASH, TRUE,
+                                             KEY_BACKSLASH, TRUE),
+    K_CHAR_UP("h", "h", "H", ";", ":", KEY_H, KEY_SEMICOLON, TRUE,
+                                             KEY_SEMICOLON, TRUE),
+    K_CHAR_UP("j", "j", "J", "'", "\"", KEY_J, KEY_APOSTROPHE, TRUE,
+                                             KEY_APOSTROPHE, TRUE),
+    K_CHAR_UP("k", "k", "K", ",", "<", KEY_K, KEY_COMMA,     TRUE,
+                                             KEY_COMMA,     TRUE),
+    K_CHAR_UP("l", "l", "L", ".", ">", KEY_L, KEY_DOT,       TRUE,
+                                             KEY_DOT,       TRUE),
+
+    K_CHAR_UP("z", "z", "Z", "/", "?", KEY_Z, KEY_SLASH,     TRUE,
+                                             KEY_SLASH,     TRUE),
+    K_CHAR_UP("x", "x", "X", "`", "~", KEY_X, KEY_GRAVE,     TRUE,
+                                             KEY_GRAVE,     TRUE),
+    K_CHAR_UP("c", "c", "C", "-", "_", KEY_C, KEY_MINUS,     TRUE,
+                                             KEY_MINUS,     TRUE),
+    K_CHAR_UP("v", "v", "V", "=", "+", KEY_V, KEY_EQUAL,     TRUE,
+                                             KEY_EQUAL,     TRUE),
+    K_CHAR_UP("b", "b", "B", "[", "{", KEY_B, KEY_LEFTBRACE, TRUE,
+                                             KEY_LEFTBRACE, TRUE),
+    K_CHAR_UP("n", "n", "N", "]", "}", KEY_N, KEY_RIGHTBRACE, TRUE,
+                                             KEY_RIGHTBRACE, TRUE),
+    K_CHAR_UP("m", "m", "M", "\\", "|", KEY_M, KEY_BACKSLASH, TRUE,
+                                             KEY_BACKSLASH, TRUE),
 };
 
 const KeyDef *keylib_get(const char *id) {

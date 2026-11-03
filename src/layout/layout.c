@@ -35,14 +35,19 @@ const LayoutOps *layout_lookup(const char *name) {
 
 static guint g_input_region_idle = 0;
 
-/* 递归收集所有 mapped 的 GtkEventBox（KeyButton）和 GtkButton（工具栏按钮）。
- * 其他容器（GtkBox、GtkOverlay、GtkLabel）不加入 region。 */
+/* 递归收集所有 mapped 的按键（KeyButton 的 GtkEventBox）和 GtkButton（工具栏按钮）。
+ * 顶栏拖动区也是 EventBox，但它不算按键，这里靠 "osk-keybutton" 标记排除，
+ * 否则透明布局下这一条会挡住输入穿透。 */
 static void collect_input_widgets(GtkWidget *w, GList **list) {
     if (!gtk_widget_get_mapped(w))
         return;
 
-    if (GTK_IS_EVENT_BOX(w) || GTK_IS_BUTTON(w))
+    if (GTK_IS_BUTTON(w)) {
         *list = g_list_append(*list, w);
+    } else if (GTK_IS_EVENT_BOX(w) &&
+               g_object_get_data(G_OBJECT(w), "osk-keybutton")) {
+        *list = g_list_append(*list, w);
+    }
 
     if (GTK_IS_CONTAINER(w)) {
         GList *children = gtk_container_get_children(GTK_CONTAINER(w));

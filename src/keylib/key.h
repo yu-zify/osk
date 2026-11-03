@@ -22,17 +22,27 @@ typedef struct {
     KeyClass       klass;
     KeyAction      action;
 
-    const char    *label;
-    const char    *label_shift;   /* NULL = 与 label 相同 */
-    const char    *label_up;      /* NULL = 不支持上滑 */
+    const char    *label;         /* 主标签：普通形态（小写字母、数字、符号） */
+    const char    *label_shift;   /* Shift/Caps 激活时的主标签；NULL = 与 label 相同 */
+
+    /* 上滑：像真实键盘的符号键一样有上下两档。
+     * 普通状态下滑出 label_up，Shift 激活时滑出 label_up_shift。 */
+    const char    *label_up;
+    const char    *label_up_shift;
 
     unsigned short code;
-    unsigned short up_code;       /* 0 = 不支持上滑 */
+
+    unsigned short up_code;       /* 普通状态上滑键码；0 = 不支持上滑 */
+    gboolean       up_shift;      /* 普通状态上滑是否需要叠加 Shift */
+    unsigned short up_code_shift; /* Shift 状态上滑键码；0 = 与 up_code 相同 */
+    gboolean       up_shift_shift;/* Shift 状态上滑是否需要叠加 Shift */
+
     gboolean       is_letter;
 
     guint          modifier_bit;
     const char    *command;
 } KeyDef;
+
 /* 位掩码，供 modifier_bit 使用 */
 #define OSK_MOD_SHIFT (1u << 0)
 #define OSK_MOD_CTRL  (1u << 1)

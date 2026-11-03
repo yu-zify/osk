@@ -14,29 +14,28 @@ static const char *const row_3[] = {
     "shift","z","x","c","v","b","n","m",",",".","/","shift", NULL
 };
 static const char *const row_4[] = {
-    "ctrl","alt","meta","esc","space","enter", NULL
+    "ctrl","alt","meta","esc","left","down","up","right","space*9", NULL
 };
 
 static GtkWidget *fullscreen_create(App *app) {
-    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL,
+                                  app->config.key_spacing);
+    gtk_widget_set_halign(root, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(root, GTK_ALIGN_CENTER);
 
-    /* 测试带：故意留 60px 空白，用来验证穿透 */
-    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_size_request(spacer, -1, 60);
-    gtk_box_pack_start(GTK_BOX(root), spacer, FALSE, FALSE, 0);
-
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_0), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_1), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_2), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_3), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_4), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_0), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_1), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_2), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_3), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_4), FALSE, FALSE, 0);
     return root;
 }
 
 static const LayoutOps fullscreen_ops = {
     .name = "fullscreen",
     .display_name = "全屏",
-    .transparent = TRUE,       /* 新增 */
+    .transparent = TRUE,       /* 输入穿透 */
+    .visual_transparent = TRUE,
     .create = fullscreen_create,
 };
 

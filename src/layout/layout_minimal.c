@@ -11,15 +11,18 @@ static const char *const row_3[] = {
     "shift","z","x","c","v","b","n","m","up","enter", NULL
 };
 static const char *const row_4[] = {
-    "esc","ctrl","alt","space","left","down","right", NULL
+    "esc","ctrl","alt","space*3","left","down","right", NULL
 };
 
 static GtkWidget *minimal_create(App *app) {
-    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_1), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_2), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_3), TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_4), TRUE, TRUE, 0);
+    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL,
+                                  app->config.key_spacing);
+    gtk_widget_set_halign(root, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(root, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_1), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_2), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_3), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_4), FALSE, FALSE, 0);
     return root;
 }
 

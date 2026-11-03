@@ -11,20 +11,28 @@
 typedef struct _LayoutOps LayoutOps;
 
 typedef enum {
-    SHIFT_OFF,       /* 小写 */
-    SHIFT_ONESHOT,   /* 下一个字符大写，然后自动关闭 */
-    SHIFT_LOCKED,    /* 持续大写，直到手动关闭 */
+    SHIFT_OFF,       /* 小写，按钮默认颜色 */
+    SHIFT_ONESHOT,   /* 下一个字符大写，然后自动关闭；按钮红色 */
+    SHIFT_LOCKED,    /* 持续大写，直到手动关闭；按钮蓝色 */
 } ShiftState;
+
+/* 可在设置里调整的外观参数 */
+typedef struct {
+    gint    key_width;      /* 按键固定宽度（像素） */
+    gint    key_height;     /* 按键固定高度（像素） */
+    gint    key_spacing;    /* 按键间距 */
+    gdouble opacity;        /* 键盘整体不透明度 0.2 ~ 1.0 */
+} OskConfig;
 
 typedef struct {
     OskKeyboard *kbd;
     OskMouse    *mouse;
 
-    ShiftState shift_state;        /* 替代原来的 gboolean shift */
-    guint      shift_click_timer;  /* 双击/三击检测定时器 */
-    gint       shift_click_count;  /* 当前连续点击计数 */
+    ShiftState shift_state;        /* 三态循环：OFF → ONESHOT → LOCKED → OFF */
 
     gboolean ctrl, alt, meta, caps;
+
+    OskConfig config;
 
     GPtrArray *key_buttons;
     KeyButton *shift_btns[2];
@@ -45,9 +53,16 @@ void app_on_key_activate(const KeyDef *def, gboolean is_repeat,
 /* 注册一个新建的 KeyButton，记录到 key_buttons 并登记修饰键按钮 */
 void app_register_key_button(App *app, KeyButton *kb);
 
-/* 根据 shift/caps 状态刷新所有标签 */
+/* 根据 shift/caps 状态刷新所有键的标签与颜色 */
 void app_refresh_labels(App *app);
 
-void app_on_key_swipe(const KeyDef *def, gpointer user_data);   
+/* 上滑输入（匹配 KeyButtonSwipeFunc） */
+void app_on_key_swipe(const KeyDef *def, gpointer user_data);
+
+/* 应用外观配置（透明度等） */
+void app_apply_config(App *app);
+
+/* 按当前 config 重建布局（设置里改了键宽高/间距后调用） */
+void app_rebuild_layout(App *app);
 
 #endif
