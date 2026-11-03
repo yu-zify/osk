@@ -1,35 +1,69 @@
 #include "layout.h"
 #include "util.h"
 
-static const char *const row_1[] = {
+/* ===== 第一页：字母主键区 ===== */
+static const char *const p1_row_1[] = {
     "q","w","e","r","t","y","u","i","o","p", NULL
 };
-static const char *const row_2[] = {
+static const char *const p1_row_2[] = {
     "a","s","d","f","g","h","j","k","l","backspace", NULL
 };
-static const char *const row_3[] = {
+static const char *const p1_row_3[] = {
     "shift","z","x","c","v","b","n","m","up","enter", NULL
 };
-static const char *const row_4[] = {
+static const char *const p1_row_4[] = {
     "esc","ctrl","alt","space*3","left","down","right", NULL
 };
 
-static GtkWidget *minimal_create(App *app) {
+/* ===== 第二页：功能键 + 控制键 + 符号键 =====
+ * 符号键复用 keylib 里已有的定义（它们本身带 Shift 形态，
+ * Shift 激活时中间会显示 ! @ # 等上档符号）。 */
+static const char *const p2_row_1[] = {
+    "esc","tab","backspace","enter", NULL
+};
+static const char *const p2_row_2[] = {
+    "up","down","left","right", NULL
+};
+static const char *const p2_row_3[] = {
+    "1","2","3","4","5","6","7","8","9","0", NULL
+};
+static const char *const p2_row_4[] = {
+    "`","-","=","[","]","\\",";","'",",",".","/", NULL
+};
+static const char *const p2_row_5[] = {
+    "shift","caps","ctrl","alt","meta","space*3", NULL
+};
+
+static GtkWidget *make_column(App *app, const char *const *const *rows,
+                               int count) {
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL,
                                   app->config.key_spacing);
     gtk_widget_set_halign(root, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(root, GTK_ALIGN_CENTER);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_1), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_2), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_3), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, row_4), FALSE, FALSE, 0);
+    for (int i = 0; i < count; ++i)
+        gtk_box_pack_start(GTK_BOX(root), layout_build_row(app, rows[i]),
+                           FALSE, FALSE, 0);
     return root;
+}
+
+static GtkWidget *minimal_create(App *app) {
+    static const char *const *const page1[] = {
+        p1_row_1, p1_row_2, p1_row_3, p1_row_4
+    };
+    static const char *const *const page2[] = {
+        p2_row_1, p2_row_2, p2_row_3, p2_row_4, p2_row_5
+    };
+
+    if (app->page == 1)
+        return make_column(app, page2, G_N_ELEMENTS(page2));
+    return make_column(app, page1, G_N_ELEMENTS(page1));
 }
 
 static const LayoutOps minimal_ops = {
     .name = "minimal",
     .display_name = "最简",
     .transparent = FALSE,
+    .pages = 2,
     .create = minimal_create,
 };
 

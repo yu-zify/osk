@@ -32,15 +32,19 @@ typedef struct {
 
     gboolean ctrl, alt, meta, caps;
 
+    gint     page;                 /* 当前页，0 = 第一页；只有多页布局用得到 */
+
     OskConfig config;
 
     GPtrArray *key_buttons;
     KeyButton *shift_btns[2];
     gsize      shift_btn_count;
     KeyButton *ctrl_btn, *alt_btn, *meta_btn, *caps_btn;
+    KeyButton *page_btn;           /* 顶栏换页按钮，不随布局重建 */
 
     GtkWidget       *window;
     GtkWidget       *layout_host;
+    GtkWidget       *drag_area;    /* 顶栏拖动区，全屏/游戏布局下隐藏 */
     const LayoutOps *layout;
 } App;
 

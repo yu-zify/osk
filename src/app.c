@@ -95,7 +95,6 @@ static void consume_oneshot(App *app) {
 static void update_char_button(App *app, KeyButton *kb) {
     const KeyDef *def = key_button_def(kb);
     if (!def || def->klass != KEY_CLASS_CHAR) return;
-
     gboolean upper = want_upper(app);
 
     if (def->is_letter && def->label_shift) {
@@ -126,6 +125,10 @@ void app_on_key_activate(const KeyDef *def, gboolean is_repeat,
             on_modifier_clicked(app, def);
         return;
     }
+
+    /* 控件键（如换页按钮）不发按键事件，由创建方自己的回调处理 */
+    if (def->action == KEY_ACTION_COMMAND)
+        return;
 
     unsigned short mods[4];
     gsize n = collect_modifiers(app, def, mods);

@@ -81,6 +81,7 @@ static const LayoutOps game_ops = {
     .display_name = "游戏",
     .transparent = TRUE,          /* 输入穿透 */
     .visual_transparent = TRUE,   /* 视觉透明 */
+    .hide_drag = TRUE,            /* 铺满屏幕，顶栏不放拖动区 */
     .create = game_create,
 };
 
