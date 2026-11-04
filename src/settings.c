@@ -11,6 +11,7 @@ typedef struct {
     GtkWidget *spin_height;
     GtkWidget *spin_spacing;
     GtkWidget *spin_font;
+    GtkWidget *spin_corner;
     GtkWidget *lbl_opacity;
     GtkWidget *lbl_size;
 } SettingsUI;
@@ -53,10 +54,13 @@ static void on_size_spin_changed(GtkSpinButton *btn, gpointer data) {
     apply_size_from_ui((SettingsUI *)data);
 }
 
-/* 字号：只重载动态 CSS，不需要重建布局 */
+/* 字号：只重载动态 CSS，不需要重建布局。
+ * 主标签字号和右上角上滑字符字号一起同步，两者共用一次 CSS 重载。 */
 static void apply_font_from_ui(SettingsUI *ui) {
     ui->app->config.font_size = gtk_spin_button_get_value_as_int(
         GTK_SPIN_BUTTON(ui->spin_font));
+    ui->app->config.corner_font_size = gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(ui->spin_corner));
     app_apply_font(ui->app);
 }
 
@@ -82,6 +86,7 @@ static void on_reset(GtkButton *btn, gpointer data) {
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_height), 60);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_spacing), 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_font), 28);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_corner), 12);
     apply_size_from_ui(ui);
     apply_font_from_ui(ui);
 }
@@ -168,6 +173,7 @@ void settings_open(App *app) {
     ui->spin_height  = make_spin(20, 160, 1, app->config.key_height);
     ui->spin_spacing = make_spin(0, 30, 1, app->config.key_spacing);
     ui->spin_font    = make_spin(8, 64, 1, app->config.font_size);
+    ui->spin_corner  = make_spin(6, 40, 1, app->config.corner_font_size);
 
     gtk_box_pack_start(GTK_BOX(box),
                        make_labeled_row("键宽", ui->spin_width, NULL),
@@ -180,6 +186,9 @@ void settings_open(App *app) {
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box),
                        make_labeled_row("字号", ui->spin_font, NULL),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box),
+                       make_labeled_row("角标字号", ui->spin_corner, NULL),
                        FALSE, FALSE, 0);
 
     GtkWidget *lbl_size = gtk_label_new("");
@@ -201,6 +210,8 @@ void settings_open(App *app) {
     g_signal_connect(ui->spin_spacing, "value-changed",
                      G_CALLBACK(on_size_spin_changed), ui);
     g_signal_connect(ui->spin_font, "value-changed",
+                     G_CALLBACK(on_font_spin_changed), ui);
+    g_signal_connect(ui->spin_corner, "value-changed",
                      G_CALLBACK(on_font_spin_changed), ui);
 
     GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);

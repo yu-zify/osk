@@ -604,22 +604,43 @@ static GtkCssProvider *g_font_provider = NULL;
 void app_apply_font(App *app) {
     if (!app || !g_font_provider) return;
 
-    gint fs  = app->config.font_size;
+    gint fs = app->config.font_size;
     if (fs < 8)  fs = 8;
     if (fs > 64) fs = 64;
 
-    /* 主标签用设定字号；角标按比例缩小，并设绝对上限，
-     * 否则大字号下两个角标并排会超出 50px 的键宽。 */
-    gint corner = fs / 2;
-    if (corner < 7)  corner = 7;
-    if (corner > 12) corner = 12;
+    /* 角标字号由设置单独控制（影响字母键右上角的上滑字符） */
+    gint corner = app->config.corner_font_size;
+    if (corner < 6)  corner = 6;
+    if (corner > 40) corner = 40;
+
+    /* 主标签按字符数分级缩小：键宽固定，长标签靠降字号来放下，
+     * 而不是被省略号截断。txt1 是单字符（保持设定字号），
+     * 每多一个字符降一档，5 字符及以上用最小档。 */
+    gint fs2 = MAX(8, fs * 80 / 100);
+    gint fs3 = MAX(8, fs * 64 / 100);
+    gint fs4 = MAX(7, fs * 52 / 100);
+    gint fs5 = MAX(7, fs * 44 / 100);
 
     char *css = g_strdup_printf(
         ".osk-label-main { font-size: %dpx; }"
+        ".osk-label-main.txt2 { font-size: %dpx; }"
+        ".osk-label-main.txt3 { font-size: %dpx; }"
+        ".osk-label-main.txt4 { font-size: %dpx; }"
+        ".osk-label-main.txt5 { font-size: %dpx; }"
         ".osk-label-up, .osk-label-up-shift, .osk-label-hint {"
         "  font-size: %dpx;"
+        "}"
+        /* 顶栏里的小按键（换页/home/end）尺寸只有 34x20，
+         * 必须把小字号钉死，否则会被上面的规则放大后挤不下。
+         * 放在最后且选择器更具体，确保覆盖生效。 */
+        ".osk-tool .osk-label-main,"
+        ".osk-tool .osk-label-main.txt2,"
+        ".osk-tool .osk-label-main.txt3,"
+        ".osk-tool .osk-label-main.txt4,"
+        ".osk-tool .osk-label-main.txt5 {"
+        "  font-size: 11px;"
         "}",
-        fs, corner);
+        fs, fs2, fs3, fs4, fs5, corner);
 
     gtk_css_provider_load_from_data(g_font_provider, css, -1, NULL);
     g_free(css);
@@ -646,11 +667,12 @@ int main(int argc, char **argv) {
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
 
     /* 默认外观 */
-    g_app.config.key_width   = 50;
-    g_app.config.key_height  = 60;
-    g_app.config.key_spacing = 1;
-    g_app.config.opacity     = 1.0;
-    g_app.config.font_size   = 28;   /* 原 14px 的两倍 */
+    g_app.config.key_width        = 50;
+    g_app.config.key_height       = 60;
+    g_app.config.key_spacing      = 1;
+    g_app.config.opacity          = 1.0;
+    g_app.config.font_size        = 28;   /* 原 14px 的两倍 */
+    g_app.config.corner_font_size = 12;   /* 右上角上滑字符字号 */
     app_apply_font(&g_app);
 
     GError *error = NULL;

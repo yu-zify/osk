@@ -87,8 +87,9 @@ static const KeyDef builtin_keys[] = {
     K_MOD("alt",   "Alt",   KEY_LEFTALT,   OSK_MOD_ALT),
     K_MOD("meta",  "Meta",  KEY_LEFTMETA,  OSK_MOD_META),
 
-    /* Win 键：和 meta 同一个键码，单独给个 ⊞ 图标，方便和顶栏风格区分 */
-    K_MOD("win",   "⊞",     KEY_LEFTMETA,  OSK_MOD_META),
+    /* Win 键：真正发出 KEY_LEFTMETA 按键事件（像物理 Win 键那样唤出菜单）。
+     * 不用 K_MOD —— 修饰键只切换内部状态、不发任何事件，按下去毫无反应。 */
+    K_FN("win", "⊞", KEY_LEFTMETA),
 
     /* 控件键：换页按钮。不发按键事件，由 main.c 自己的回调处理。 */
     { "page", KEY_CLASS_CONTROL, KEY_ACTION_COMMAND, "1/2", NULL, NULL, NULL,

@@ -203,15 +203,16 @@ KeyButton *key_button_new(const KeyDef *def,
     kb->label_main = gtk_label_new(def->label);
     gtk_widget_set_halign(kb->label_main, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(kb->label_main, GTK_ALIGN_CENTER);
-    /* 按键尺寸由 key_button_set_fixed_size 固定，标签不能反过来把键撑宽。
-     * 字号可调到很大（如 "Shift"、"Home"），这里给宽度设上限并允许省略：
-     * max_width_chars 取 3 是为了和默认键宽（50px）+ 默认字号（28px）大致吻合，
-     * 长标签显示为 "Sh…"，保证所有键始终一样大。 */
+    /* 按键尺寸固定，长标签（"Shift"/"Home"/"backspace"）在大字号下必然放不下。
+     * 这里按字符数挂 txt1..txt5 类，由 app_apply_font 给出逐级缩小的字号，
+     * 让文字自动适配键宽而不是被截断。ellipsize + max_width_chars 只作为
+     * 极端情况的兜底，正常字号下不会触发。 */
     gtk_label_set_ellipsize(GTK_LABEL(kb->label_main), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(kb->label_main), 3);
+    gtk_label_set_max_width_chars(GTK_LABEL(kb->label_main), 6);
     gtk_style_context_add_class(gtk_widget_get_style_context(kb->label_main),
                                "osk-label-main");
     gtk_container_add(GTK_CONTAINER(overlay), kb->label_main);
+    key_button_update_txt_class(kb);
 
     /* 右上角：两个上滑字符并排。普通档在左，Shift 档在右。 */
     GtkWidget *corner = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
@@ -278,9 +279,31 @@ static void set_small_label(GtkWidget *label, const char *text) {
         gtk_widget_hide(label);
 }
 
+/* 按主标签的字符数切换 txt1..txt5 类，供 app_apply_font 给出逐级字号。
+ * 需要按字节数估算宽度：ASCII 与全角符号混排，这里用 g_utf8_strlen 取字符数。 */
+void key_button_update_txt_class(KeyButton *kb) {
+    if (!kb || !kb->label_main) return;
+
+    GtkStyleContext *ctx = gtk_widget_get_style_context(kb->label_main);
+    for (int i = 1; i <= 5; ++i) {
+        char cls[8];
+        g_snprintf(cls, sizeof(cls), "txt%d", i);
+        gtk_style_context_remove_class(ctx, cls);
+    }
+
+    const char *text = gtk_label_get_text(GTK_LABEL(kb->label_main));
+    glong n = text ? g_utf8_strlen(text, -1) : 1;
+
+    int idx = (int)CLAMP(n, 1, 5);
+    char cls[8];
+    g_snprintf(cls, sizeof(cls), "txt%d", idx);
+    gtk_style_context_add_class(ctx, cls);
+}
+
 void key_button_set_label(KeyButton *kb, const char *text) {
-    if (kb && kb->label_main && text)
-        gtk_label_set_text(GTK_LABEL(kb->label_main), text);
+    if (!kb || !kb->label_main || !text) return;
+    gtk_label_set_text(GTK_LABEL(kb->label_main), text);
+    key_button_update_txt_class(kb);
 }
 
 void key_button_set_up_labels(KeyButton *kb,

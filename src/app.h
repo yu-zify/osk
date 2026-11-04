@@ -18,11 +18,12 @@ typedef enum {
 
 /* 可在设置里调整的外观参数 */
 typedef struct {
-    gint    key_width;      /* 按键固定宽度（像素） */
-    gint    key_height;     /* 按键固定高度（像素） */
-    gint    key_spacing;    /* 按键间距 */
-    gdouble opacity;        /* 键盘整体不透明度 0.2 ~ 1.0 */
-    gint    font_size;      /* 按键主标签字号（像素） */
+    gint    key_width;        /* 按键固定宽度（像素） */
+    gint    key_height;       /* 按键固定高度（像素） */
+    gint    key_spacing;      /* 按键间距 */
+    gdouble opacity;          /* 键盘整体不透明度 0.2 ~ 1.0 */
+    gint    font_size;        /* 按键主标签字号（像素） */
+    gint    corner_font_size; /* 右上角上滑字符字号（像素） */
 } OskConfig;
 
 typedef struct {

@@ -22,6 +22,10 @@ GtkWidget    *key_button_widget(KeyButton *kb);
 /* 中间主字符 */
 void          key_button_set_label(KeyButton *kb, const char *text);
 
+/* 按主标签字符数刷新 txt1..txt5 样式类（字号自适应，避免长标签被截断）。
+ * 换了字号或改了标签内容后如果直接动了 GTK 标签，需要手动调用一次。 */
+void          key_button_update_txt_class(KeyButton *kb);
+
 /* 右上角的上滑角标：普通状态一个、Shift 状态一个。
  * 传 NULL/空串表示该档不显示。highlight_shift 为真时加亮 Shift 那一个。 */
 void          key_button_set_up_labels(KeyButton *kb,
