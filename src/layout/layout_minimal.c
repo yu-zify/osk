@@ -19,25 +19,19 @@ static const char *const p1_row_4[] = {
  * 符号键复用 keylib 里已有的定义（它们本身带 Shift 形态，
  * Shift 激活时中间会显示 ! @ # 等上档符号）。 */
 static const char *const p2_row_f1[] = {
-    "f1","f2","f3","f4","f5","f6", NULL
+    "f1","f2","f3","f4","f5","f6","1","2","3","backspace" NULL
 };
 static const char *const p2_row_f2[] = {
-    "f7","f8","f9","f10","f11","f12", NULL
+    "f7","f8","f9","f10","f11","f12","4","5","6","enter" NULL
 };
 static const char *const p2_row_1[] = {
-    "esc","tab","backspace","enter", NULL
+    "`","-","=","[","]","7","8","9","home", NULL
 };
 static const char *const p2_row_2[] = {
-    "home","end","up","down","left","right", NULL
+    "\\",";","'",",",".","/","0","up","end", NULL
 };
 static const char *const p2_row_3[] = {
-    "1","2","3","4","5","6","7","8","9","0", NULL
-};
-static const char *const p2_row_4[] = {
-    "`","-","=","[","]","\\",";","'",",",".","/", NULL
-};
-static const char *const p2_row_5[] = {
-    "shift","caps","ctrl","alt","meta","space*3", NULL
+    "esc","tap","shift","ctrl","alt","win","space","left","down","right", NULL
 };
 
 static GtkWidget *make_column(App *app, const char *const *const *rows,
