@@ -19,19 +19,19 @@ static const char *const p1_row_4[] = {
  * 符号键复用 keylib 里已有的定义（它们本身带 Shift 形态，
  * Shift 激活时中间会显示 ! @ # 等上档符号）。 */
 static const char *const p2_row_f1[] = {
-    "f1","f2","f3","f4","f5","f6","1","2","3","backspace" NULL
+    "f1","f2","f3","f4","f5","f6","1","2","3","backspace", NULL
 };
 static const char *const p2_row_f2[] = {
-    "f7","f8","f9","f10","f11","f12","4","5","6","enter" NULL
+    "f7","f8","f9","f10","f11","f12","4","5","6","enter", NULL
 };
 static const char *const p2_row_1[] = {
-    "`","-","=","[","]","7","8","9","home", NULL
+    "tab","`","-","=","[","]","7","8","9","home", NULL
 };
 static const char *const p2_row_2[] = {
-    "\\",";","'",",",".","/","0","up","end", NULL
+    "shift","\\",";","'",",",".","/","0","up","end", NULL
 };
 static const char *const p2_row_3[] = {
-    "esc","tap","shift","ctrl","alt","win","space","left","down","right", NULL
+    "esc","ctrl","alt","win","space*3","left","down","right", NULL
 };
 
 static GtkWidget *make_column(App *app, const char *const *const *rows,
@@ -52,7 +52,7 @@ static GtkWidget *minimal_create(App *app) {
     };
     static const char *const *const page2[] = {
         p2_row_f1, p2_row_f2, p2_row_1, p2_row_2,
-        p2_row_3, p2_row_4, p2_row_5
+        p2_row_3
     };
 
     if (app->page == 1)
