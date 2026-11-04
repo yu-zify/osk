@@ -186,29 +186,32 @@ static void on_settings_clicked(GtkButton *btn, gpointer data) {
 
 /* 最小化按钮：
  *   单击 → 最小化
- *   长按 0.6 秒 → 关闭键盘（退出程序）
- * 通过标志区分：长按触发后把 long_fired 置位，随后的 clicked 不再最小化。 */
+ *   长按 → 关闭键盘（退出程序）
+ * 注意 GTK3 的 GtkGestureLongPress 只有两个信号：pressed 和 cancelled，
+ * 其中 pressed 是「长按被识别」时发出（不是初次按下），没有 long-pressed。 */
 static gboolean g_min_long_fired = FALSE;
 
-static gboolean on_minimize_long_press(GtkGestureLongPress *g, gdouble x,
-                                        gdouble y, gpointer data) {
+/* 长按被识别 */
+static void on_minimize_long_pressed(GtkGestureLongPress *g, gdouble x,
+                                      gdouble y, gpointer data) {
     (void)g; (void)x; (void)y;
     g_min_long_fired = TRUE;
     g_print("[OSK] 长按最小化键 → 关闭键盘\n");
     gtk_window_close(GTK_WINDOW(data));
-    return TRUE;
 }
 
-static void on_minimize_pressed(GtkGestureLongPress *g, gdouble x, gdouble y,
-                                 gpointer data) {
-    (void)g; (void)x; (void)y; (void)data;
-    /* 每次重新按下都清掉标志，保证下一次单击仍是最小化 */
+/* 真正按下时复位标志，保证下一次单击仍然是「最小化」。
+ * 返回 FALSE 不拦截事件，GtkButton 自己还要用它。 */
+static gboolean on_minimize_button_press(GtkWidget *w, GdkEventButton *ev,
+                                          gpointer data) {
+    (void)w; (void)ev; (void)data;
     g_min_long_fired = FALSE;
+    return FALSE;
 }
 
 static void on_minimize_clicked(GtkButton *btn, gpointer data) {
     (void)btn;
-    /* 长按已经关窗口了，这次 clicked 是长按产生的，忽略 */
+    /* 长按已经触发了关窗，这次 clicked 是长按产生的，忽略 */
     if (g_min_long_fired) {
         g_min_long_fired = FALSE;
         return;
@@ -216,16 +219,18 @@ static void on_minimize_clicked(GtkButton *btn, gpointer data) {
     gtk_window_iconify(GTK_WINDOW(data));
 }
 
-/* 记录长按手势对象的引用，长按触发后把它撤掉，
- * 这样后续不会有额外事件触发 clicked 之外的行为 */
 static void attach_long_press(GtkWidget *widget, gpointer window) {
     GtkGesture *lp = gtk_gesture_long_press_new(widget);
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(lp), GDK_BUTTON_PRIMARY);
-    g_signal_connect(lp, "pressed",  G_CALLBACK(on_minimize_pressed), window);
-    g_signal_connect(lp, "long-pressed",
-                     G_CALLBACK(on_minimize_long_press), window);
+    g_signal_connect(lp, "pressed",
+                     G_CALLBACK(on_minimize_long_pressed), window);
     g_object_set_data_full(G_OBJECT(widget), "osk-longpress",
                            lp, g_object_unref);
+
+    /* 复位标志：按钮按下时就把上一次的长按状态清掉 */
+    gtk_widget_add_events(widget, GDK_BUTTON_PRESS_MASK);
+    g_signal_connect(widget, "button-press-event",
+                     G_CALLBACK(on_minimize_button_press), NULL);
 }
 
 /* ===== 窗口销毁 ===== */
