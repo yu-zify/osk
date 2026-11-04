@@ -184,9 +184,48 @@ static void on_settings_clicked(GtkButton *btn, gpointer data) {
     settings_open((App *)data);
 }
 
+/* 最小化按钮：
+ *   单击 → 最小化
+ *   长按 0.6 秒 → 关闭键盘（退出程序）
+ * 通过标志区分：长按触发后把 long_fired 置位，随后的 clicked 不再最小化。 */
+static gboolean g_min_long_fired = FALSE;
+
+static gboolean on_minimize_long_press(GtkGestureLongPress *g, gdouble x,
+                                        gdouble y, gpointer data) {
+    (void)g; (void)x; (void)y;
+    g_min_long_fired = TRUE;
+    g_print("[OSK] 长按最小化键 → 关闭键盘\n");
+    gtk_window_close(GTK_WINDOW(data));
+    return TRUE;
+}
+
+static void on_minimize_pressed(GtkGestureLongPress *g, gdouble x, gdouble y,
+                                 gpointer data) {
+    (void)g; (void)x; (void)y; (void)data;
+    /* 每次重新按下都清掉标志，保证下一次单击仍是最小化 */
+    g_min_long_fired = FALSE;
+}
+
 static void on_minimize_clicked(GtkButton *btn, gpointer data) {
     (void)btn;
+    /* 长按已经关窗口了，这次 clicked 是长按产生的，忽略 */
+    if (g_min_long_fired) {
+        g_min_long_fired = FALSE;
+        return;
+    }
     gtk_window_iconify(GTK_WINDOW(data));
+}
+
+/* 记录长按手势对象的引用，长按触发后把它撤掉，
+ * 这样后续不会有额外事件触发 clicked 之外的行为 */
+static void attach_long_press(GtkWidget *widget, gpointer window) {
+    GtkGesture *lp = gtk_gesture_long_press_new(widget);
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(lp), GDK_BUTTON_PRIMARY);
+    g_signal_connect(lp, "pressed",  G_CALLBACK(on_minimize_pressed), window);
+    g_signal_connect(lp, "long-pressed",
+                     G_CALLBACK(on_minimize_long_press), window);
+    g_object_set_data_full(G_OBJECT(widget), "osk-longpress",
+                           lp, g_object_unref);
 }
 
 /* ===== 窗口销毁 ===== */
@@ -279,14 +318,17 @@ static GtkWidget *build_toolbar(App *app) {
     gtk_widget_show_all(menu);
 
     /* GtkMenuButton 本身是 GtkButton 子类，会被 input region 正常收集；
-     * 弹出菜单是独立 popup 窗口，不受 input region 限制。 */
+     * 弹出菜单是独立 popup 窗口，不受 input region 限制。
+     * 用圆形循环箭头表示「切换布局」，比文字省空间。 */
     GtkWidget *layout_btn = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(layout_btn), "布局 ▾");
+    gtk_button_set_label(GTK_BUTTON(layout_btn), "⟳");
     gtk_widget_set_can_focus(layout_btn, FALSE);
     gtk_widget_set_focus_on_click(layout_btn, FALSE);
-    gtk_widget_set_tooltip_text(layout_btn, "选择布局");
+    gtk_widget_set_tooltip_text(layout_btn, "切换布局");
     gtk_style_context_add_class(gtk_widget_get_style_context(layout_btn),
                                 "osk-tool");
+    gtk_style_context_add_class(gtk_widget_get_style_context(layout_btn),
+                                "osk-cycle");
     gtk_menu_button_set_popup(GTK_MENU_BUTTON(layout_btn), menu);
     gtk_box_pack_start(GTK_BOX(bar), layout_btn, FALSE, FALSE, 0);
 
@@ -353,11 +395,13 @@ static GtkWidget *build_toolbar(App *app) {
     GtkWidget *minimize = gtk_button_new_with_label("—");
     gtk_widget_set_can_focus(minimize, FALSE);
     gtk_widget_set_focus_on_click(minimize, FALSE);
-    gtk_widget_set_tooltip_text(minimize, "最小化");
+    gtk_widget_set_tooltip_text(minimize, "单击最小化，长按关闭键盘");
     gtk_style_context_add_class(gtk_widget_get_style_context(minimize),
                                 "osk-tool");
     g_signal_connect(minimize, "clicked",
                      G_CALLBACK(on_minimize_clicked), app->window);
+    /* 长按 0.6 秒关闭键盘 */
+    attach_long_press(minimize, app->window);
     gtk_box_pack_start(GTK_BOX(right), minimize, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(bar), right, FALSE, FALSE, 0);
@@ -468,6 +512,14 @@ static const char *app_css =
     ".osk-tool .osk-label-main {"
     "  font-size: 11px;"
     "}"
+    /* 布局切换按钮：圆形循环箭头 */
+    ".osk-tool.osk-cycle {"
+    "  min-width: 22px;"
+    "  min-height: 22px;"
+    "  padding: 0;"
+    "  border-radius: 11px;"
+    "  font-size: 13px;"
+    "}"
     /* 按键：固定尺寸、圆角、柔和阴影 */
     ".osk-key {"
     "  border: 1px solid #4a515c;"
@@ -539,6 +591,35 @@ static const char *app_css =
     "  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);"
     "}";
 
+/* ===== 动态字号 =====
+ * 静态 CSS 里写死字号无法运行时调整，这里单独用一个高优先级的 provider，
+ * 变更时重载内容即可，不需要重建整个布局。 */
+static GtkCssProvider *g_font_provider = NULL;
+
+void app_apply_font(App *app) {
+    if (!app || !g_font_provider) return;
+
+    gint fs  = app->config.font_size;
+    if (fs < 8)  fs = 8;
+    if (fs > 64) fs = 64;
+
+    /* 主标签用设定字号；角标按比例缩小，并设绝对上限，
+     * 否则大字号下两个角标并排会超出 50px 的键宽。 */
+    gint corner = fs / 2;
+    if (corner < 7)  corner = 7;
+    if (corner > 12) corner = 12;
+
+    char *css = g_strdup_printf(
+        ".osk-label-main { font-size: %dpx; }"
+        ".osk-label-up, .osk-label-up-shift, .osk-label-hint {"
+        "  font-size: %dpx;"
+        "}",
+        fs, corner);
+
+    gtk_css_provider_load_from_data(g_font_provider, css, -1, NULL);
+    g_free(css);
+}
+
 /* ===== main ===== */
 
 int main(int argc, char **argv) {
@@ -552,11 +633,20 @@ int main(int argc, char **argv) {
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css_provider);
 
+    /* 字号 provider 优先级更高，覆盖基础样式里的字号 */
+    g_font_provider = gtk_css_provider_new();
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(g_font_provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+
     /* 默认外观 */
     g_app.config.key_width   = 50;
     g_app.config.key_height  = 60;
     g_app.config.key_spacing = 1;
     g_app.config.opacity     = 1.0;
+    g_app.config.font_size   = 28;   /* 原 14px 的两倍 */
+    app_apply_font(&g_app);
 
     GError *error = NULL;
     g_app.kbd = osk_keyboard_new("/dev/uinput", &error);

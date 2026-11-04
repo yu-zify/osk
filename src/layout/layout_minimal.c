@@ -12,7 +12,7 @@ static const char *const p1_row_3[] = {
     "shift","z","x","c","v","b","n","m","up","enter", NULL
 };
 static const char *const p1_row_4[] = {
-    "esc","ctrl","alt","space*3","left","down","right", NULL
+    "esc","ctrl","alt","space*3","win","left","down","right", NULL
 };
 
 /* ===== 第二页：功能键 + 控制键 + 符号键 =====

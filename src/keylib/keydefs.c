@@ -87,6 +87,9 @@ static const KeyDef builtin_keys[] = {
     K_MOD("alt",   "Alt",   KEY_LEFTALT,   OSK_MOD_ALT),
     K_MOD("meta",  "Meta",  KEY_LEFTMETA,  OSK_MOD_META),
 
+    /* Win 键：和 meta 同一个键码，单独给个 ⊞ 图标，方便和顶栏风格区分 */
+    K_MOD("win",   "⊞",     KEY_LEFTMETA,  OSK_MOD_META),
+
     /* 控件键：换页按钮。不发按键事件，由 main.c 自己的回调处理。 */
     { "page", KEY_CLASS_CONTROL, KEY_ACTION_COMMAND, "1/2", NULL, NULL, NULL,
       0, 0, FALSE, 0, FALSE, FALSE, 0, "page" },

@@ -22,6 +22,7 @@ typedef struct {
     gint    key_height;     /* 按键固定高度（像素） */
     gint    key_spacing;    /* 按键间距 */
     gdouble opacity;        /* 键盘整体不透明度 0.2 ~ 1.0 */
+    gint    font_size;      /* 按键主标签字号（像素） */
 } OskConfig;
 
 typedef struct {
@@ -65,6 +66,9 @@ void app_on_key_swipe(const KeyDef *def, gpointer user_data);
 
 /* 应用外观配置（透明度等） */
 void app_apply_config(App *app);
+
+/* 应用字号（重载动态 CSS provider，不需要重建布局） */
+void app_apply_font(App *app);
 
 /* 按当前 config 重建布局（设置里改了键宽高/间距后调用） */
 void app_rebuild_layout(App *app);

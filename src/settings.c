@@ -1,6 +1,6 @@
 #include "settings.h"
 
-/* （app_rebuild_layout / app_apply_config 声明在 app.h） */
+/* （app_rebuild_layout / app_apply_config / app_apply_font 声明在 app.h） */
 typedef struct {
     App       *app;
     GtkWidget *window;
@@ -10,6 +10,7 @@ typedef struct {
     GtkWidget *spin_width;
     GtkWidget *spin_height;
     GtkWidget *spin_spacing;
+    GtkWidget *spin_font;
     GtkWidget *lbl_opacity;
     GtkWidget *lbl_size;
 } SettingsUI;
@@ -52,10 +53,24 @@ static void on_size_spin_changed(GtkSpinButton *btn, gpointer data) {
     apply_size_from_ui((SettingsUI *)data);
 }
 
+/* 字号：只重载动态 CSS，不需要重建布局 */
+static void apply_font_from_ui(SettingsUI *ui) {
+    ui->app->config.font_size = gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(ui->spin_font));
+    app_apply_font(ui->app);
+}
+
+/* GtkSpinButton::value-changed —— 字号单独处理 */
+static void on_font_spin_changed(GtkSpinButton *btn, gpointer data) {
+    (void)btn;
+    apply_font_from_ui((SettingsUI *)data);
+}
+
 /* GtkButton::clicked */
 static void on_apply_clicked(GtkButton *btn, gpointer data) {
     (void)btn;
     apply_size_from_ui((SettingsUI *)data);
+    apply_font_from_ui((SettingsUI *)data);
 }
 
 static void on_reset(GtkButton *btn, gpointer data) {
@@ -66,7 +81,9 @@ static void on_reset(GtkButton *btn, gpointer data) {
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_width), 50);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_height), 60);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_spacing), 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_font), 28);
     apply_size_from_ui(ui);
+    apply_font_from_ui(ui);
 }
 
 static GtkWidget *make_labeled_row(const char *title, GtkWidget *control,
@@ -116,7 +133,7 @@ void settings_open(App *app) {
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     ui->window = win;
     gtk_window_set_title(GTK_WINDOW(win), "设置");
-    gtk_window_set_default_size(GTK_WINDOW(win), 420, 300);
+    gtk_window_set_default_size(GTK_WINDOW(win), 420, 340);
     gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
     gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER);
     g_object_set_data(G_OBJECT(app->window), "osk-settings-window", win);
@@ -150,6 +167,7 @@ void settings_open(App *app) {
     ui->spin_width   = make_spin(20, 160, 1, app->config.key_width);
     ui->spin_height  = make_spin(20, 160, 1, app->config.key_height);
     ui->spin_spacing = make_spin(0, 30, 1, app->config.key_spacing);
+    ui->spin_font    = make_spin(8, 64, 1, app->config.font_size);
 
     gtk_box_pack_start(GTK_BOX(box),
                        make_labeled_row("键宽", ui->spin_width, NULL),
@@ -159,6 +177,9 @@ void settings_open(App *app) {
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box),
                        make_labeled_row("间距", ui->spin_spacing, NULL),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box),
+                       make_labeled_row("字号", ui->spin_font, NULL),
                        FALSE, FALSE, 0);
 
     GtkWidget *lbl_size = gtk_label_new("");
@@ -179,6 +200,8 @@ void settings_open(App *app) {
                      G_CALLBACK(on_size_spin_changed), ui);
     g_signal_connect(ui->spin_spacing, "value-changed",
                      G_CALLBACK(on_size_spin_changed), ui);
+    g_signal_connect(ui->spin_font, "value-changed",
+                     G_CALLBACK(on_font_spin_changed), ui);
 
     GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_pack_start(GTK_BOX(btns), apply, TRUE, TRUE, 0);

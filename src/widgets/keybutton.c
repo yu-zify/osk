@@ -203,6 +203,12 @@ KeyButton *key_button_new(const KeyDef *def,
     kb->label_main = gtk_label_new(def->label);
     gtk_widget_set_halign(kb->label_main, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(kb->label_main, GTK_ALIGN_CENTER);
+    /* 按键尺寸由 key_button_set_fixed_size 固定，标签不能反过来把键撑宽。
+     * 字号可调到很大（如 "Shift"、"Home"），这里给宽度设上限并允许省略：
+     * max_width_chars 取 3 是为了和默认键宽（50px）+ 默认字号（28px）大致吻合，
+     * 长标签显示为 "Sh…"，保证所有键始终一样大。 */
+    gtk_label_set_ellipsize(GTK_LABEL(kb->label_main), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(kb->label_main), 3);
     gtk_style_context_add_class(gtk_widget_get_style_context(kb->label_main),
                                "osk-label-main");
     gtk_container_add(GTK_CONTAINER(overlay), kb->label_main);
