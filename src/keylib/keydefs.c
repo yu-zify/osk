@@ -155,8 +155,14 @@ static const KeyDef builtin_keys[] = {
 };
 
 const KeyDef *keylib_get(const char *id) {
+    if (!id) return NULL;
     for (gsize i = 0; i < G_N_ELEMENTS(builtin_keys); ++i)
         if (strcmp(builtin_keys[i].id, id) == 0)
             return &builtin_keys[i];
     return NULL;
+}
+
+const KeyDef *keylib_all(gsize *count) {
+    if (count) *count = G_N_ELEMENTS(builtin_keys);
+    return builtin_keys;
 }

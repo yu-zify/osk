@@ -88,6 +88,29 @@ fail: {
     }
 }
 
+/* ===== 按下 / 释放分离 =====
+ *
+ * 游戏布局要的是「真实键盘」的行为：手指按住时键一直处于按下状态，
+ * 游戏引擎才能读到持续按住（跑步、蓄力、连射都是这么实现的）。
+ * 原来的 osk_keyboard_chord() 是「按下+立刻抬起」的原子操作，
+ * 只能用来打字，做不了这个。
+ *
+ * 这两个函数不自动处理修饰键 —— 调用方需要自己配对调用，
+ * 保证每个 press 都有对应的 release，否则键会卡住。
+ */
+
+void osk_keyboard_key_down(OskKeyboard *kbd, unsigned short code) {
+    if (!kbd || !kbd->created) return;
+    write_event(kbd->fd, EV_KEY, code, 1);
+    write_event(kbd->fd, EV_SYN, SYN_REPORT, 0);
+}
+
+void osk_keyboard_key_up(OskKeyboard *kbd, unsigned short code) {
+    if (!kbd || !kbd->created) return;
+    write_event(kbd->fd, EV_KEY, code, 0);
+    write_event(kbd->fd, EV_SYN, SYN_REPORT, 0);
+}
+
 void osk_keyboard_chord(OskKeyboard *kbd, unsigned short code,
                         const unsigned short *mods, gsize n) {
     if (!kbd || !kbd->created) return;
@@ -111,6 +134,21 @@ void osk_keyboard_chord(OskKeyboard *kbd, unsigned short code,
         write_event(kbd->fd, EV_KEY, mods[i - 1], 0);
     if (n > 0)
         write_event(kbd->fd, EV_SYN, SYN_REPORT, 0);
+}
+
+/* 松开所有当前按下的键。
+ * 退出游戏布局、切换布局、窗口销毁时都要调一次 ——
+ * 否则切走的那一刻按住的键会永远停在按下状态（sticky key），
+ * 表现就是切回来之后系统一直以为你在按 W。 */
+void osk_keyboard_release_all(OskKeyboard *kbd) {
+    if (!kbd || !kbd->created) return;
+
+    for (unsigned short c = 0; c <= KEY_MAX; ++c) {
+        /* 只对可能注册过的键发抬起，避免每次遍历上千个码位刷爆缓冲 */
+        if (c > KEY_MICMUTE && c < BTN_MISC) continue;
+        write_event(kbd->fd, EV_KEY, c, 0);
+    }
+    write_event(kbd->fd, EV_SYN, SYN_REPORT, 0);
 }
 
 void osk_keyboard_free(OskKeyboard *kbd) {

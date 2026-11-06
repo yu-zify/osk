@@ -1,8 +1,18 @@
 #include <gtk/gtk.h>
+
+/* gdkx.h 只在 GTK 构建时启用了 X11 后端才存在。
+ * 无条件 include 在纯 Wayland 构建上会直接编译失败。 */
+#ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
+#endif
+
 #include "app.h"
 #include "settings.h"
 #include "layout/layout.h"
+#include "layout/gamepad_layout.h"
+#include "layout/gamepad_editor.h"
+#include "widgets/touchpad.h"
+#include "backend/uinput_mouse.h"
 
 static App g_app = {0};
 
@@ -87,17 +97,21 @@ void app_rebuild_layout(App *app) {
 static void app_set_layout(App *app, const LayoutOps *ops) {
     if (!app || !ops) return;
 
-    /* --- 窗口属性按布局切换 --- */
-    gboolean fullscreen = ops->transparent;
-    if (fullscreen) {
-        gtk_window_set_type_hint(GTK_WINDOW(app->window),
-                                  GDK_WINDOW_TYPE_HINT_DOCK);
+    /* --- 窗口属性按布局切换 ---
+     *
+     * 注意：Wayland 下没有 DOCK / UTILITY 这些 X11 概念，
+     * set_type_hint 会被 GTK 映射成近似的 xdg_toplevel 角色，
+     * 而某些角色会让 KWin 强制加服务端装饰。
+     *
+     * 所以这里只在需要时调 maximize / keep_above，
+     * 不再改 type_hint —— 窗口的「无装饰」属性在建窗时就定好了，
+     * 运行中再改角色反而可能把装饰带回来。 */
+    gboolean passthrough = ops->transparent;
+    if (passthrough) {
         gtk_window_set_skip_taskbar_hint(GTK_WINDOW(app->window), TRUE);
         gtk_window_set_keep_above(GTK_WINDOW(app->window), TRUE);
         gtk_window_maximize(GTK_WINDOW(app->window));
     } else {
-        gtk_window_set_type_hint(GTK_WINDOW(app->window),
-                                  GDK_WINDOW_TYPE_HINT_UTILITY);
         gtk_window_set_skip_taskbar_hint(GTK_WINDOW(app->window), FALSE);
         gtk_window_unmaximize(GTK_WINDOW(app->window));
     }
@@ -112,6 +126,11 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
     gtk_window_set_accept_focus(GTK_WINDOW(app->window), FALSE);
     gtk_window_set_focus_on_map(GTK_WINDOW(app->window), FALSE);
 
+    /* 切布局前先把游戏布局里按住的东西放掉。
+     * 否则从游戏布局切到标准布局时，那些键在系统侧仍处于按下状态，
+     * 表现为「切回来之后一直有个键卡着」。切出时是无害的空操作。 */
+    layout_game_release_all(app);
+
     app->layout = ops;
     app->page   = 0;          /* 切布局时回到第一页 */
 
@@ -119,11 +138,63 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
     if (app->drag_area)
         gtk_widget_set_visible(app->drag_area, !ops->hide_drag);
 
+    /* 游戏布局编辑按钮只在游戏布局下出现 */
+    if (app->game_edit_btn)
+        gtk_widget_set_visible(app->game_edit_btn,
+                               ops == layout_game_ops());
+
+    /* 顶栏排列方式。
+     *
+     * 普通布局：「左按钮 + 弹性拖动区 + 右侧按钮组」，拖动区占满中间，
+     *           所以右侧按钮自然贴右 —— 这时要拖窗口，不能没有它。
+     * 游戏布局：铺满屏幕不需要拖动窗口，隐藏拖动区，
+     *           让「布局切换 + 按钮组」整体居中。
+     *
+     * 注意：布局切换按钮在任何布局下都必须可见 ——
+     * 否则切进游戏布局就出不来了。 */
+    gboolean game_mode = (ops == layout_game_ops());
+
+    if (app->toolbar) {
+        gtk_widget_set_halign(app->toolbar,
+                               game_mode ? GTK_ALIGN_CENTER
+                                         : GTK_ALIGN_FILL);
+        gtk_widget_set_hexpand(app->toolbar, !game_mode);
+    }
+
+    /* 拖动区虽然被 hide_drag 隐藏，但它仍占着 hexpand。
+     * 缩到 0 宽，这样剩下的按钮才能真的居中。 */
+    if (app->drag_area) {
+        gtk_widget_set_hexpand(app->drag_area, !game_mode);
+        gtk_widget_set_size_request(app->drag_area,
+                                     game_mode ? 0 : -1, -1);
+    }
+
+    /* home/end 在游戏布局下没意义，隐藏以腾出空间 */
+    if (app->home_end_box)
+        gtk_widget_set_visible(app->home_end_box, !game_mode);
+
+    /* 鼠标按钮同理：游戏布局下不需要触控板 */
+    if (app->mouse_btn)
+        gtk_widget_set_visible(app->mouse_btn, !game_mode);
+
+    /* 切到游戏布局时把触控板弹窗关掉 —— 它置顶且不抢焦点，
+     * 留在屏幕上会挡住游戏画面。 */
+    if (game_mode && app->mouse_panel)
+        gtk_widget_destroy(app->mouse_panel);
+
     app_rebuild_layout(app);
     update_page_button(app);
 
     /* 最大化/还原会改变 WM 侧装饰，切换布局后重新确认无边框 */
     apply_borderless(app);
+}
+
+/* 对外入口：切换布局。编辑面板与设置面板都通过它切，
+ * 避免各自复制一份窗口属性设置逻辑。 */
+void app_switch_layout(App *app, const LayoutOps *ops) {
+    if (!app || !ops || ops == app->layout) return;
+    g_print("[OSK] 切换到布局：%s\n", ops->display_name);
+    app_set_layout(app, ops);
 }
 
 /* 每次窗口尺寸变化都要同步重算输入区。
@@ -148,31 +219,49 @@ static gboolean on_window_configure(GtkWidget *w, GdkEventConfigure *ev,
     return FALSE;
 }
 
-/* 去掉系统标题栏与边框。
+/* 确保窗口保持无边框。
  *
- * 光靠 gtk_window_set_decorated(FALSE) 不够，有两层原因：
- *   1. GTK 自己会给 toplevel 绘制 "decoration" 节点的阴影/圆角边框，
- *      即使窗口已被设为无装饰 —— 这是「边框去不掉」的主因。
- *      对应处理在 CSS 里（见 app_css 的 decoration 规则）。
- *   2. 窗口最大化/全屏时，不少窗口管理器会强制补回装饰。
- *      这里在 X11 侧再清一次 WM 提示。
- * 两个时机都要调用：窗口创建后，以及 map 之后（WM 可能此时才响应）。 */
+ * ===== KWin 的特殊行为 =====
+ *
+ * KWin 对 GTK 应用优先强制服务端装饰（SSD），并忽略应用发出的
+ * 「不要装饰」请求（KDE Bug 484800）。所以单靠
+ * gtk_window_set_decorated(FALSE) 在 Wayland + KWin 下无效。
+ *
+ * 真正起作用的是 app_force_csd()：给窗口挂一个空 titlebar，
+ * 逼 GTK 走 CSD 路径，KWin 才会放手。
+ *
+ * 本函数用于 map 之后、切换布局之后再次确认状态 ——
+ * 因为 maximize/unmaximize 会让某些合成器重新评估装饰。
+ * 注意这里也要走 app_force_csd，否则会把 CSD 状态改回 SSD。 */
 static void apply_borderless(App *app) {
     if (!app || !app->window) return;
 
-    gtk_window_set_decorated(GTK_WINDOW(app->window), FALSE);
+    /* 重复调用是安全的：titlebar 已存在时 set_titlebar 会替换它，
+     * 仍然保持 CSD 模式。 */
+    app_force_csd(GTK_WINDOW(app->window));
 
     GdkWindow *gw = gtk_widget_get_window(app->window);
     if (!gw) return;
 
-    /* WM 侧：清掉所有装饰位，功能只保留移动与最小化 */
-    gdk_window_set_decorations(gw, 0);
-    gdk_window_set_functions(gw, GDK_FUNC_MOVE | GDK_FUNC_MINIMIZE);
+    /* X11 侧再清一次 WM 提示。Wayland 下这几个调用是空操作，
+     * 保留是为了兼容 XWayland/X11 会话（程序可能在那里运行）。
+     *
+     * 用 GDK_WINDOWING_X11 做编译期保护：如果 GTK 构建时没启用
+     * X11 后端，gdkx.h 和 GDK_IS_X11_WINDOW 都不存在，
+     * 无条件使用会直接编译失败。 */
+#ifdef GDK_WINDOWING_X11
+    if (GDK_IS_X11_WINDOW(gw)) {
+        gdk_window_set_decorations(gw, 0);
+        gdk_window_set_functions(gw, GDK_FUNC_MOVE | GDK_FUNC_MINIMIZE);
+    }
+#else
+    (void)gw;
+#endif
 }
 
 /* map 之后再来一次：窗口管理器往往在 map 时才真正套用装饰 */
 static gboolean on_window_map(GtkWidget *w, GdkEvent *ev, gpointer data) {
-    (void)ev; (void)data;
+    (void)w; (void)ev; (void)data;
     apply_borderless(&g_app);
     return FALSE;
 }
@@ -182,6 +271,155 @@ static gboolean on_window_map(GtkWidget *w, GdkEvent *ev, gpointer data) {
 static void on_settings_clicked(GtkButton *btn, gpointer data) {
     (void)btn;
     settings_open((App *)data);
+}
+
+/* ===== 触控板弹窗 =====
+ *
+ * 以前触控板是一个独立布局，但切布局会打断键盘输入 ——
+ * 而实际使用中「边打字边点鼠标」是常态。改成弹窗后两者可以并存。
+ *
+ * 窗口特性：
+ *   - 无系统装饰 + 自绘白边（和主窗口一致）
+ *   - 置顶，不抢焦点
+ *   - 关闭时清掉 app 上的句柄，再次点击按钮会重新创建
+ */
+
+/* 鼠标按键的上下文：哪个设备、哪个键。
+ * 原来定义在 layout_touchpad.c 里，那个文件删掉后搬到这里。 */
+typedef struct {
+    OskMouse *mouse;
+    guint     button;
+} MouseBtnCtx;
+
+static void on_mouse_btn_pressed(GtkButton *btn, gpointer data) {
+    (void)btn;
+    MouseBtnCtx *ctx = data;
+    if (ctx && ctx->mouse)
+        osk_mouse_button(ctx->mouse, ctx->button, TRUE);
+}
+
+static void on_mouse_btn_released(GtkButton *btn, gpointer data) {
+    (void)btn;
+    MouseBtnCtx *ctx = data;
+    if (ctx && ctx->mouse)
+        osk_mouse_button(ctx->mouse, ctx->button, FALSE);
+}
+
+static void on_mouse_panel_destroy(GtkWidget *w, gpointer data) {
+    App *app = data;
+    if (app) app->mouse_panel = NULL;
+    (void)w;
+}
+
+static void on_mouse_panel_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    App *app = data;
+    if (!app) return;
+
+    /* 已打开就提到前面，不重复创建 */
+    if (app->mouse_panel) {
+        gtk_window_present(GTK_WINDOW(app->mouse_panel));
+        return;
+    }
+
+    GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    app->mouse_panel = win;
+
+    gtk_window_set_title(GTK_WINDOW(win), "触控板");
+    gtk_window_set_default_size(GTK_WINDOW(win), 420, 300);
+    gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
+
+    /* 不抢焦点：点触控板时不能把当前应用的输入焦点弄丢 */
+    gtk_window_set_accept_focus(GTK_WINDOW(win), FALSE);
+    gtk_window_set_focus_on_map(GTK_WINDOW(win), FALSE);
+
+    app_setup_subwindow(win);
+    g_signal_connect(win, "destroy",
+                     G_CALLBACK(on_mouse_panel_destroy), app);
+
+    /* 统一外壳：标题栏（可拖动）+ 关闭按钮 */
+    GtkWidget *content = app_subwindow_shell(win, "触控板");
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 6);
+    gtk_box_pack_start(GTK_BOX(content), box, TRUE, TRUE, 0);
+
+    /* 触控板区域 */
+    TouchpadWidget *tw = touchpad_widget_new(app->mouse, app);
+    GtkWidget *area = touchpad_widget_gtk(tw);
+    gtk_widget_set_size_request(area, -1, 200);
+    gtk_box_pack_start(GTK_BOX(box), area, TRUE, TRUE, 0);
+
+    /* 左中右三键：按住持续生效，所以用 pressed/released 而不是 clicked */
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+
+    struct { const char *label; guint code; } btns[] = {
+        { "左键", BTN_LEFT   },
+        { "中键", BTN_MIDDLE },
+        { "右键", BTN_RIGHT  },
+    };
+
+    for (gsize i = 0; i < G_N_ELEMENTS(btns); ++i) {
+        GtkWidget *b = gtk_button_new_with_label(btns[i].label);
+        gtk_widget_set_can_focus(b, FALSE);
+        gtk_widget_set_focus_on_click(b, FALSE);
+        gtk_widget_set_size_request(b, -1, 42);
+        gtk_style_context_add_class(gtk_widget_get_style_context(b), "osk-tool");
+
+        MouseBtnCtx *ctx = g_new0(MouseBtnCtx, 1);
+        ctx->mouse  = app->mouse;
+        ctx->button = btns[i].code;
+        g_object_set_data_full(G_OBJECT(b), "osk-mbtnctx", ctx, g_free);
+
+        g_signal_connect(b, "pressed",
+                         G_CALLBACK(on_mouse_btn_pressed),  ctx);
+        g_signal_connect(b, "released",
+                         G_CALLBACK(on_mouse_btn_released), ctx);
+
+        gtk_box_pack_start(GTK_BOX(row), b, TRUE, TRUE, 0);
+    }
+    gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
+
+    /* 内容就位后再挂白边 */
+    app_finish_subwindow(win);
+
+    /* 应用用户配置的触控板透明度 */
+    app_apply_pad_config(app);
+
+    gtk_widget_show_all(win);
+}
+
+/* 游戏布局编辑按钮：直接切换编辑模式，不弹面板。
+ *
+ *   点一下 → 进入编辑模式（按钮变成锁定外观）
+ *   再点一下 → 退出编辑模式并自动保存
+ *
+ * 编辑模式下的增删改都在画布上完成（见 layout_game.c 的捕获层），
+ * 所以这里只负责开关状态和视觉反馈。 */
+static void on_gamepad_edit_clicked(GtkButton *btn, gpointer data) {
+    App *app = data;
+    GpState *st = app ? app->gp : NULL;
+    if (!app || !st) return;
+
+    gboolean entering = !st->editing;
+
+    /* 锁定外观：进入时高亮，退出时恢复 */
+    GtkStyleContext *ctx = gtk_widget_get_style_context(GTK_WIDGET(btn));
+    if (entering)
+        gtk_style_context_add_class(ctx, "osk-locked");
+    else
+        gtk_style_context_remove_class(ctx, "osk-locked");
+
+    if (!entering) {
+        /* 退出编辑：先把所有按住的键放掉再存盘 */
+        layout_game_release_all(app);
+        gamepad_save();
+        g_print("[OSK] 退出编辑模式，布局已保存\n");
+    } else {
+        g_print("[OSK] 进入编辑模式\n");
+    }
+
+    gamepad_set_editing(app, entering);
 }
 
 /* 最小化按钮：
@@ -237,6 +475,13 @@ static void attach_long_press(GtkWidget *widget, gpointer window) {
 
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     (void)widget; (void)user_data;
+
+    /* 先把还按着的键和摇杆放掉，再销毁设备 */
+    layout_game_release_all(&g_app);
+    gamepad_state_free(&g_app);
+
+    osk_gamepad_free(g_app.gamepad);
+    g_app.gamepad = NULL;
     osk_keyboard_free(g_app.kbd);
     g_app.kbd = NULL;
     osk_mouse_free(g_app.mouse);
@@ -303,7 +548,7 @@ static GtkWidget *build_toolbar(App *app) {
 
     /* --- 左侧：布局选择（弹窗菜单） --- */
     static const char *const layout_names[] = {
-        "standard", "minimal", "fullscreen", "touchpad", "game"
+        "standard", "minimal", "game"
     };
 
     GtkWidget *menu = gtk_menu_new();
@@ -336,6 +581,24 @@ static GtkWidget *build_toolbar(App *app) {
                                 "osk-cycle");
     gtk_menu_button_set_popup(GTK_MENU_BUTTON(layout_btn), menu);
     gtk_box_pack_start(GTK_BOX(bar), layout_btn, FALSE, FALSE, 0);
+
+    /* --- 鼠标按钮：弹出触控板子窗口 ---
+     *
+     * 以前「触控板」是一个独立布局，但它和键盘并不冲突 ——
+     * 用户往往想一边打字一边点鼠标，切布局会打断这个流程。
+     * 改成弹窗后两件事可以同时做。 */
+    GtkWidget *mouse_btn = gtk_button_new_with_label("🖱");
+    gtk_widget_set_can_focus(mouse_btn, FALSE);
+    gtk_widget_set_focus_on_click(mouse_btn, FALSE);
+    gtk_widget_set_tooltip_text(mouse_btn, "触控板");
+    gtk_style_context_add_class(gtk_widget_get_style_context(mouse_btn),
+                                "osk-tool");
+    gtk_style_context_add_class(gtk_widget_get_style_context(mouse_btn),
+                                "osk-cycle");
+    g_signal_connect(mouse_btn, "clicked",
+                     G_CALLBACK(on_mouse_panel_clicked), app);
+    gtk_box_pack_start(GTK_BOX(bar), mouse_btn, FALSE, FALSE, 0);
+    app->mouse_btn = mouse_btn;
 
     /* --- 中间：拖动区（只放一个移动符号，尽量省空间） --- */
     GtkWidget *drag_area = gtk_event_box_new();
@@ -372,7 +635,12 @@ static GtkWidget *build_toolbar(App *app) {
         app->page_btn = pb;
     }
 
-    /* home / end：直接用键盘键定义，走正常发键流程 */
+    /* home / end：直接用键盘键定义，走正常发键流程。
+     *
+     * 用一个子容器包起来，方便整体控制可见性 ——
+     * 游戏布局下这两个键没用（游戏不认 Home/End），
+     * 隐藏它们能给编辑按钮腾出空间。 */
+    GtkWidget *home_end_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 3);
     static const char *const extra_keys[] = { "home", "end" };
     for (gsize i = 0; i < G_N_ELEMENTS(extra_keys); ++i) {
         const KeyDef *kd = keylib_get(extra_keys[i]);
@@ -383,9 +651,11 @@ static GtkWidget *build_toolbar(App *app) {
         gtk_style_context_add_class(gtk_widget_get_style_context(
                                         key_button_widget(kb)), "osk-tool");
         gtk_widget_set_tooltip_text(key_button_widget(kb), kd->label);
-        gtk_box_pack_start(GTK_BOX(right), key_button_widget(kb),
+        gtk_box_pack_start(GTK_BOX(home_end_box), key_button_widget(kb),
                            FALSE, FALSE, 0);
     }
+    gtk_box_pack_start(GTK_BOX(right), home_end_box, FALSE, FALSE, 0);
+    app->home_end_box = home_end_box;
 
     GtkWidget *settings = gtk_button_new_with_label("⚙");
     gtk_widget_set_can_focus(settings, FALSE);
@@ -396,6 +666,18 @@ static GtkWidget *build_toolbar(App *app) {
     g_signal_connect(settings, "clicked",
                      G_CALLBACK(on_settings_clicked), app);
     gtk_box_pack_start(GTK_BOX(right), settings, FALSE, FALSE, 0);
+
+    /* 游戏布局编辑：只在游戏布局下显示，避免顶栏常驻一个无关按钮 */
+    GtkWidget *game_edit = gtk_button_new_with_label("✎");
+    gtk_widget_set_can_focus(game_edit, FALSE);
+    gtk_widget_set_focus_on_click(game_edit, FALSE);
+    gtk_widget_set_tooltip_text(game_edit, "编辑游戏布局");
+    gtk_style_context_add_class(gtk_widget_get_style_context(game_edit),
+                                "osk-tool");
+    g_signal_connect(game_edit, "clicked",
+                     G_CALLBACK(on_gamepad_edit_clicked), app);
+    gtk_box_pack_start(GTK_BOX(right), game_edit, FALSE, FALSE, 0);
+    app->game_edit_btn = game_edit;
 
     GtkWidget *minimize = gtk_button_new_with_label("—");
     gtk_widget_set_can_focus(minimize, FALSE);
@@ -410,6 +692,11 @@ static GtkWidget *build_toolbar(App *app) {
     gtk_box_pack_start(GTK_BOX(right), minimize, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(bar), right, FALSE, FALSE, 0);
+
+    /* 保存引用，供布局切换时调整居中方式 */
+    app->toolbar = bar;
+    app->toolbar_left = layout_btn;
+    app->toolbar_right = right;
 
     return bar;
 }
@@ -429,9 +716,45 @@ static const char *app_css =
     "  padding: 0;"
     "  background-color: transparent;"
     "}"
-    /* 关键：GTK3 给 toplevel 画了一层 decoration 节点（窗口阴影 + 圆角边框），
-     * 即使 gtk_window_set_decorated(FALSE) 也照样画。这里把它整个抹掉，
-     * 否则窗口四周会一直有一圈阴影/描边，看起来就像「边框去不掉」。 */
+    /* ===== 子窗口 =====
+     * 所有子窗口（设置、触控板、编辑面板、对话框）共用一套外壳，
+     * 保证观感与主窗口一致：无系统装饰 + 自绘白边 + 标题栏。 */
+    "window.osk-subwindow {"
+    "  background-color: transparent;"
+    "}"
+    /* 外壳：白边由 cairo 画在它的外沿，这里只给半透明底色，
+     * 让内容和桌面区分开。 */
+    ".osk-subwin-shell {"
+    "  background-color: rgba(30, 33, 39, 0.96);"
+    "}"
+    /* 标题栏：和主窗口顶栏同一套观感 */
+    ".osk-subwin-bar {"
+    "  background-color: rgba(52, 57, 67, 0.55);"
+    "  padding: 4px 6px;"
+    "  border-bottom: 1px solid rgba(255,255,255,0.08);"
+    "}"
+    ".osk-subwin-title {"
+    "  color: #d6dae0;"
+    "  font-size: 12px;"
+    "}"
+    ".osk-subwin-content {"
+    "  background-color: transparent;"
+    "}"
+    /* 关闭按钮：窄一点，和标题栏高度协调 */
+    ".osk-tool.osk-subwin-close {"
+    "  min-width: 26px;"
+    "  min-height: 24px;"
+    "  padding: 0;"
+    "  font-size: 13px;"
+    "}"
+    /* 把 GTK 的 decoration 节点整个抹平：不要阴影、不要圆角、不要边框。
+     *
+     * 注意这里只能设成 none —— 之前试过在这里画白边，结果
+     * GTK 的弹出菜单（GtkMenu 也是带 decoration 的 toplevel）
+     * 跟着丢了背景，变成透明。
+     *
+     * 白边改为在代码里用 cairo 自绘（见 attach_border_draw），
+     * 只画在真正需要的窗口上，不影响菜单。 */
     ".decoration {"
     "  border: none;"
     "  border-radius: 0;"
@@ -454,7 +777,7 @@ static const char *app_css =
     ".osk-toolbar {"
     "  background-color: transparent;"
     "  background-image: none;"
-    "  padding: 3px 6px;"
+    "  padding: 4px 7px;"
     "  border: none;"
     "}"
     ".osk-title {"
@@ -491,24 +814,30 @@ static const char *app_css =
     "  color: #6b7280;"
     "}"
     ".osk-tool {"
-    "  min-height: 20px;"
-    "  min-width: 26px;"
-    "  padding: 0 6px;"
-    "  border: 1px solid #454b54;"
-    "  border-radius: 5px;"
-    "  background-image: none;"
-    "  background-color: #343943;"
-    "  color: #d6dae0;"
-    "  font-size: 11px;"
+    "  min-height: 30px;"
+    "  min-width: 38px;"
+    "  padding: 0 10px;"
+    "  border: 1px solid rgba(255,255,255,0.14);"
+    "  border-radius: 7px;"
+    "  background-image: linear-gradient(to bottom,"
+    "    rgba(255,255,255,0.07) 0%,"
+    "    rgba(0,0,0,0.04) 100%);"
+    "  background-color: rgba(52, 57, 67, 0.62);"
+    "  color: #e8ecf2;"
+    "  font-size: 15px;"
     "  text-shadow: none;"
-    "  box-shadow: none;"
+    "  box-shadow: inset 0 1px 0 rgba(255,255,255,0.10),"
+    "              0 1px 2px rgba(0,0,0,0.30);"
+    "  transition: background-color 80ms ease, border-color 80ms ease;"
     "}"
     ".osk-tool:hover {"
-    "  background-color: #3f4652;"
-    "  border-color: #5a6270;"
+    "  background-color: rgba(78, 87, 101, 0.80);"
+    "  border-color: rgba(255,255,255,0.30);"
     "}"
     ".osk-tool:active {"
-    "  background-color: #2a2f38;"
+    "  background-image: none;"
+    "  background-color: rgba(36, 41, 50, 0.90);"
+    "  box-shadow: inset 0 2px 3px rgba(0,0,0,0.40);"
     "}"
     /* 顶栏里用 KeyButton 实现的控件（换页、home/end）也跟着缩小 */
     ".osk-tool.osk-key {"
@@ -525,19 +854,74 @@ static const char *app_css =
     "  border-radius: 11px;"
     "  font-size: 13px;"
     "}"
-    /* 按键：固定尺寸、圆角、柔和阴影 */
+    /* 按键：固定尺寸、圆角、立体感。
+     *
+     * 视觉层次靠三层叠加：
+     *   1. 渐变背景 —— 顶部略亮，模拟受光面
+     *   2. 1px 高光边 —— 顶部一条浅色内阴影，做出「凸起」错觉
+     *   3. 底部投影 —— 让按键像浮在键盘面上
+     */
     ".osk-key {"
-    "  border: 1px solid #4a515c;"
+    "  border: 1px solid rgba(255,255,255,0.10);"
     "  border-radius: 8px;"
-    "  background-image: none;"
-    "  background-color: #3a404a;"
+    "  background-image: linear-gradient(to bottom,"
+    "    rgba(255,255,255,0.08) 0%,"
+    "    rgba(255,255,255,0.02) 45%,"
+    "    rgba(0,0,0,0.06) 100%);"
+    "  background-color: #3d444f;"
     "  color: #eef1f5;"
-    "  box-shadow: 0 1px 0 rgba(0,0,0,0.35);"
-    "  transition: background-color 90ms ease;"
+    "  box-shadow: inset 0 1px 0 rgba(255,255,255,0.13),"
+    "              0 2px 3px rgba(0,0,0,0.38);"
+    "  transition: background-color 80ms ease,"
+    "              box-shadow 80ms ease,"
+    "              border-color 80ms ease;"
+    "}"
+    /* 悬停：轻微提亮，给指针反馈 */
+    ".osk-key:hover {"
+    "  background-color: #464e5b;"
+    "  border-color: rgba(255,255,255,0.18);"
+    "}"
+    /* 按下：整体下沉 —— 投影收掉、内阴影加深，模拟被按进去 */
+    ".osk-key:active {"
+    "  background-color: #333944;"
+    "  background-image: linear-gradient(to bottom,"
+    "    rgba(0,0,0,0.12) 0%,"
+    "    rgba(0,0,0,0.03) 100%);"
+    "  box-shadow: inset 0 2px 4px rgba(0,0,0,0.45);"
+    "}"
+    /* 实际生效的按压反馈。
+     *
+     * 上面的 :active 对 KeyButton 无效 —— 它的壳是 GtkEventBox，
+     * 没有 :active 伪类。按压状态由 keybutton.c 通过添加/移除
+     * key-pressed 类来维护。
+     *
+     * 白色高亮：让用户明确看到「这一下被接收了」。 */
+    ".osk-key.key-pressed {"
+    "  background-color: #f2f5f9;"
+    "  background-image: none;"
+    "  border-color: #ffffff;"
+    "  color: #1a1d22;"
+    "  box-shadow: inset 0 2px 5px rgba(0,0,0,0.28),"
+    "              0 0 6px rgba(255,255,255,0.35);"
+    "}"
+    /* 白色按下时，内部的标签也要跟着变深色，否则白底白字看不见 */
+    ".osk-key.key-pressed .osk-label-main,"
+    ".osk-key.key-pressed .osk-label-up,"
+    ".osk-key.key-pressed .osk-label-up-shift,"
+    ".osk-key.key-pressed .osk-label-hint {"
+    "  color: #1a1d22;"
     "}"
     ".osk-key.swipe-active {"
     "  background-color: #c5548f;"
     "  border-color: #e580b4;"
+    "}"
+    /* 游戏布局里按住不放的键：绿色高亮 + 发光感 */
+    ".osk-key.key-held {"
+    "  background-color: #2f8f4e;"
+    "  border-color: #57d07e;"
+    "  color: #ffffff;"
+    "  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25),"
+    "              0 0 8px rgba(87,208,126,0.55);"
     "}"
     ".osk-label-main {"
     "  font-size: 14px;"
@@ -564,6 +948,19 @@ static const char *app_css =
     "  font-size: 9px;"
     "  color: #8f97a3;"
     "}"
+    /* 游戏布局：按键没有上滑功能，右上角的两个角标字符纯属干扰。
+     * 隐藏它们（连同左上角的 Shift 提示一起），让按键表面干净。 */
+    ".osk-no-swipe-hint .osk-label-up,"
+    ".osk-no-swipe-hint .osk-label-up-shift,"
+    ".osk-no-swipe-hint .osk-label-hint {"
+    "  opacity: 0;"
+    "  font-size: 0;"
+    "}"
+    /* 位置与尺寸对话框里的单位提示 */
+    ".osk-dim {"
+    "  color: #8b929c;"
+    "  font-size: 11px;"
+    "}"
     /* 修饰键：Shift 单次 = 蓝色 */
     ".osk-key.mod-oneshot {"
     "  background-color: #2f6fd0;"
@@ -578,6 +975,24 @@ static const char *app_css =
     "}"
     /* 透明布局 */
     "window.osk-transparent { background-color: rgba(0,0,0,0); }"
+    /* 游戏布局：画布本身完全透明，只有控件可见 */
+    ".osk-gamepad-canvas {"
+    "  background-color: transparent;"
+    "  background-image: none;"
+    "}"
+    /* 游戏按键被按住时的视觉反馈：见上面的 .osk-key.key-held
+     * （已合并到主按键样式附近，避免重复定义） */
+    /* 编辑模式下被拖动的控件 */
+    ".osk-transparent-key.gp-selected {"
+    "  border-color: #ffc46b;"
+    "  border-width: 2px;"
+    "}"
+    /* 顶栏的编辑按钮处于锁定（编辑模式开启）状态 */
+    ".osk-tool.osk-locked {"
+    "  background-color: #c9873c;"
+    "  border-color: #ffc46b;"
+    "  color: #ffffff;"
+    "}"
     ".osk-key.osk-transparent-key {"
     "  background-color: rgba(28,31,36,0.55);"
     "  border: 1px solid rgba(255, 255, 255, 0.30);"
@@ -605,13 +1020,13 @@ void app_apply_font(App *app) {
     if (!app || !g_font_provider) return;
 
     gint fs = app->config.font_size;
-    if (fs < 8)  fs = 8;
-    if (fs > 64) fs = 64;
+    if (fs < OSK_FONT_SIZE_MIN) fs = OSK_FONT_SIZE_MIN;
+    if (fs > OSK_FONT_SIZE_MAX) fs = OSK_FONT_SIZE_MAX;
 
     /* 角标字号由设置单独控制（影响字母键右上角的上滑字符） */
     gint corner = app->config.corner_font_size;
-    if (corner < 6)  corner = 6;
-    if (corner > 40) corner = 40;
+    if (corner < OSK_CORNER_FONT_SIZE_MIN) corner = OSK_CORNER_FONT_SIZE_MIN;
+    if (corner > OSK_CORNER_FONT_SIZE_MAX) corner = OSK_CORNER_FONT_SIZE_MAX;
 
     /* 主标签按字符数分级缩小：键宽固定，长标签靠降字号来放下，
      * 而不是被省略号截断。txt1 是单字符（保持设定字号），
@@ -666,13 +1081,10 @@ int main(int argc, char **argv) {
         GTK_STYLE_PROVIDER(g_font_provider),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
 
-    /* 默认外观 */
-    g_app.config.key_width        = 50;
-    g_app.config.key_height       = 60;
-    g_app.config.key_spacing      = 1;
-    g_app.config.opacity          = 1.0;
-    g_app.config.font_size        = 28;   /* 原 14px 的两倍 */
-    g_app.config.corner_font_size = 12;   /* 右上角上滑字符字号 */
+    /* 外观：先取默认值，再用配置文件覆盖。
+     * 以前这里是硬编码的六个数字，改完设置重启就丢，
+     * 「恢复默认」按钮等于每次启动的自动行为。 */
+    config_load(&g_app.config);
     app_apply_font(&g_app);
 
     GError *error = NULL;
@@ -688,6 +1100,12 @@ int main(int argc, char **argv) {
                     error->message);
         g_clear_error(&error);
     }
+    g_app.gamepad = osk_gamepad_new("/dev/uinput", &error);
+    if (!g_app.gamepad) {
+        g_printerr("[OSK] 手柄初始化失败：%s（摇杆与手柄键不可用）\n",
+                    error->message ? error->message : "未知错误");
+        g_clear_error(&error);
+    }
 
     g_app.key_buttons = g_ptr_array_new();
 
@@ -696,8 +1114,18 @@ int main(int argc, char **argv) {
     gtk_window_set_default_size(GTK_WINDOW(g_app.window), 800, 380);
     gtk_window_set_keep_above(GTK_WINDOW(g_app.window), TRUE);
 
-    /* 隐藏标题栏：无边框窗口，由自绘顶栏承担拖动与按钮 */
-    gtk_window_set_decorated(GTK_WINDOW(g_app.window), FALSE);
+    /* 隐藏标题栏。
+     *
+     * 关键：必须用 app_force_csd() 而不是直接 set_decorated(FALSE)。
+     *
+     * KWin 对 GTK 应用会强制服务端装饰（SSD），无视「不要装饰」的请求
+     * （KDE Bug 484800）。给窗口设一个空 titlebar 后，GTK 会走 CSD 路径，
+     * 合成器放手，此时 set_decorated(FALSE) 才真正生效。
+     *
+     * 另外不设 type_hint：Wayland 下 DOCK/UTILITY 这些 X11 概念
+     * 没有直接对应，GTK 会挑一个近似的角色，反而可能让合成器
+     * 加上服务端装饰。保持默认的普通 toplevel 最稳。 */
+    app_force_csd(GTK_WINDOW(g_app.window));
     gtk_window_set_resizable(GTK_WINDOW(g_app.window), TRUE);
 
     g_signal_connect(g_app.window, "destroy",
@@ -718,18 +1146,36 @@ int main(int argc, char **argv) {
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(g_app.window), outer);
 
+    /* 白边用 cairo 自绘（CSS 方案会影响弹出菜单，见 app_attach_border）。
+     * 必须在外层容器建好之后调用 —— 它挂到子控件上，
+     * 子控件不存在时会退回到窗口本身，那样在 CSD 模式下画不出来。 */
+    app_attach_border(g_app.window);
+
     GtkWidget *toolbar = build_toolbar(&g_app);
     gtk_box_pack_start(GTK_BOX(outer), toolbar, FALSE, FALSE, 0);
+    /* 顶栏与白边错开 1px，和下面的按键区保持一致 */
+    gtk_widget_set_margin_start(toolbar, 1);
+    gtk_widget_set_margin_end(toolbar, 1);
+    gtk_widget_set_margin_top(toolbar, 1);
 
     g_app.layout_host = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    /* 不要四周留白：键盘紧贴窗口边缘 */
-    gtk_widget_set_margin_start(g_app.layout_host, 0);
-    gtk_widget_set_margin_end(g_app.layout_host, 0);
+    /* 按键与白边之间留 1px：白边是画在 outer 外沿的描边，
+     * 内容整体内缩 1px 就不会压到线上。 */
+    gtk_widget_set_margin_start(g_app.layout_host, 1);
+    gtk_widget_set_margin_end(g_app.layout_host, 1);
     gtk_widget_set_margin_top(g_app.layout_host, 0);
-    gtk_widget_set_margin_bottom(g_app.layout_host, 0);
+    gtk_widget_set_margin_bottom(g_app.layout_host, 1);
     gtk_widget_set_hexpand(g_app.layout_host, TRUE);
     gtk_widget_set_vexpand(g_app.layout_host, TRUE);
     gtk_box_pack_start(GTK_BOX(outer), g_app.layout_host, TRUE, TRUE, 0);
+
+    /* 游戏布局：从配置载入自定义控件表（没有就用默认布局）。
+     * 必须在切到游戏布局之前完成，否则画布构建时拿不到模型。 */
+    {
+        GpState *st = gamepad_state();
+        st->model = config_load_gamepad();
+        g_app.gp = st;
+    }
 
     /* 加载默认布局 */
     app_set_layout(&g_app, layout_lookup("standard"));

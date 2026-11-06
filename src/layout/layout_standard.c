@@ -9,13 +9,13 @@ static const char *const p1_row_upper[] = {
     "tab","q","w","e","r","t","y","u","i","o","p","[","]", "\\", NULL
 };
 static const char *const p1_row_middle[] = {
-    "caps","a","s","d","f","g","h","j","k","l",";","'","enter", NULL
+    "caps","a","s","d","f","g","h","j","k","l",";","'","enter*2", NULL
 };
 static const char *const p1_row_lower[] = {
-    "shift","z","x","c","v","b","n","m",",",".","/","shift", NULL
+    "shift*2","z","x","c","v","b","n","m",",",".","/","up","shift", NULL
 };
 static const char *const p1_row_special[] = {
-    "ctrl","alt","meta","esc","left","down","up","right","space*5", NULL
+    "esc","ctrl","alt","win","space*5","alt","ctrl","left","down","right", NULL
 };
 
 /* ===== 第二页：功能键 + 控制键 + 符号键 ===== */

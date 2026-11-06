@@ -12,10 +12,26 @@ typedef void (*KeyButtonActivateFunc)(const KeyDef *def,
 
 typedef void (*KeyButtonSwipeFunc)(const KeyDef *def, gpointer user_data);
 
+/* 长按语义的两个回调：手指按下时调 on_press，松手时调 on_release。
+ * 两者一定成对出现（取消手势时也会补一次 release）。 */
+typedef void (*KeyButtonHoldFunc)(const KeyDef *def, gpointer user_data);
+
 KeyButton *key_button_new(const KeyDef *def,
                            KeyButtonActivateFunc on_activate,
                            KeyButtonSwipeFunc on_swipe,
                            gpointer user_data);
+
+/* 切换成「真实键盘」模式：按下即持续按住，松手才释放。
+ *
+ * 与默认模式的区别：
+ *   - 不发 is_repeat 连发（按住重复是文本输入才需要的行为）
+ *   - 不响应上滑（游戏里一个键就一个功能，上滑会误触）
+ *   - 按下立即生效，不需要等到松手
+ *
+ * 游戏布局用它来实现「按住 W 一直前进」这种真实按键状态。 */
+void key_button_set_hold_mode(KeyButton *kb,
+                               KeyButtonHoldFunc on_press,
+                               KeyButtonHoldFunc on_release);
 
 GtkWidget    *key_button_widget(KeyButton *kb);
 

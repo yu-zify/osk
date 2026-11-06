@@ -1,4 +1,6 @@
 #include "touchpad.h"
+#include "app.h"
+#include "layout/layout.h"
 
 #define MAX_TOUCHES             10
 #define TAP_TIMEOUT_MS          200   /* 单次轻点最长持续时间 */
@@ -27,6 +29,9 @@ typedef struct {
 struct _TouchpadWidget {
     GtkWidget  *area;
     OskMouse   *mouse;
+    /* 用于点击穿透：注入点击前在光标处挖洞。
+     * 可能为 NULL（独立使用时），此时不挖洞，行为与以前一致。 */
+    struct _App *app;
 
     TouchPoint touches[MAX_TOUCHES];
     gint       n_active;
@@ -43,9 +48,82 @@ struct _TouchpadWidget {
     gdouble  tap_x, tap_y;
     gdouble  drag_start_x, drag_start_y;
     gint     max_touches;
+
+    /* 点击穿透的延时注入状态 */
+    guint      click_delay_id;    /* 挖洞后等待注入的定时器 */
+    guint      hole_restore_id;   /* 注入后等待恢复的定时器 */
+    guint      pending_btn;       /* 待注入的按钮 */
 };
 
-/* ===== 触点管理 ===== */
+/* ===== 点击穿透 =====
+ *
+ * 注入的 BTN_LEFT 会走和真实设备一样的命中测试。光标压在 OSK 控件上时，
+ * 这次点击会被 OSK 吃掉。解决：注入前在光标处挖一个洞。
+ *
+ * 时序（Wayland 下两条路径是分开的）：
+ *   region 变更 → 合成器 socket  → 可能有延迟
+ *   uinput 注入 → libinput → 合成器
+ * 无法保证先后，所以挖洞后等一小段再注入，注入后再等一小段恢复。
+ *
+ * 两个延时都是用户无感的量级（毫秒级），但能显著提高成功率。
+ */
+
+#define CLICK_PUNCH_DELAY_MS   25   /* 挖洞后等合成器处理，再注入 */
+#define CLICK_RESTORE_DELAY_MS 80   /* 注入后保持洞，避免恢复早于点击 */
+
+/* 注入后延时恢复 */
+static gboolean restore_hole_tick(gpointer data) {
+    TouchpadWidget *tw = data;
+    tw->hole_restore_id = 0;
+    if (tw->app)
+        layout_restore_hole(tw->app);
+    return G_SOURCE_REMOVE;
+}
+
+/* 真正执行注入，并安排恢复 */
+static gboolean inject_click_tick(gpointer data) {
+    TouchpadWidget *tw = data;
+    tw->click_delay_id = 0;
+
+    osk_mouse_button(tw->mouse, tw->pending_btn, TRUE);
+    osk_mouse_button(tw->mouse, tw->pending_btn, FALSE);
+
+    if (tw->app) {
+        if (tw->hole_restore_id)
+            g_source_remove(tw->hole_restore_id);
+        tw->hole_restore_id = g_timeout_add(CLICK_RESTORE_DELAY_MS,
+                                             restore_hole_tick, tw);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* 注入一次点击，必要时先挖洞。
+ *
+ * 所有点击注入都走这里，替代直接调用 osk_mouse_button。
+ * 没有 app 引用时（独立使用触控板控件）退化为立即注入，行为与以前一致。 */
+static void inject_click(TouchpadWidget *tw, guint button) {
+    if (!tw || !tw->mouse) return;
+
+    if (!tw->app) {
+        /* 没接 layout：直接注入 */
+        osk_mouse_button(tw->mouse, button, TRUE);
+        osk_mouse_button(tw->mouse, button, FALSE);
+        return;
+    }
+
+    /* 上一轮还没注入的先取消，避免堆叠 */
+    if (tw->click_delay_id) {
+        g_source_remove(tw->click_delay_id);
+        tw->click_delay_id = 0;
+    }
+
+    layout_punch_hole(tw->app);
+
+    tw->pending_btn = button;
+    tw->click_delay_id = g_timeout_add(CLICK_PUNCH_DELAY_MS,
+                                        inject_click_tick, tw);
+}
+
 
 static TouchPoint *find_touch(TouchpadWidget *tw, guintptr id) {
     for (int i = 0; i < MAX_TOUCHES; ++i)
@@ -101,6 +179,12 @@ static void emit_move(TouchpadWidget *tw, gdouble dx, gdouble dy) {
     tw->accum_x -= ix;
     tw->accum_y -= iy;
     osk_mouse_move_rel(tw->mouse, ix, iy);
+
+    /* 关键：把实际注入的增量告诉 layout，让它累加出光标位置。
+     * Wayland 下查不到全局指针坐标，只能靠这个自己算 ——
+     * 这也正是点击穿透找洞位置的数据来源。 */
+    if (tw->app)
+        layout_note_cursor_move(tw->app, ix, iy);
 }
 
 /* ===== 轻点超时：发左键单击 ===== */
@@ -109,8 +193,7 @@ static gboolean on_tap_timeout(gpointer data) {
     TouchpadWidget *tw = data;
     tw->tap_timer = 0;
     if (tw->tap_state == TAP_STATE_SINGLE_WAIT) {
-        osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-        osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+        inject_click(tw, BTN_LEFT);
         tw->tap_state = TAP_STATE_IDLE;
     }
     return G_SOURCE_REMOVE;
@@ -152,8 +235,7 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 tw->drag_start_y = te->y;
             } else {
                 /* 位置太远 → 第一次的单击立刻发出 */
-                osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-                osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+                inject_click(tw, BTN_LEFT);
                 tw->tap_state = TAP_STATE_IDLE;
             }
         } else if (tw->n_active == 2) {
@@ -244,13 +326,11 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (tw->tap_state == TAP_STATE_DRAG_PENDING) {
                 /* 第二下没移动就松开 → 视为左键单击 */
-                osk_mouse_button(tw->mouse, BTN_LEFT, TRUE);
-                osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
+                inject_click(tw, BTN_LEFT);
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (is_tap && tw->max_touches >= 2) {
                 /* 双指轻点 → 右键 */
-                osk_mouse_button(tw->mouse, BTN_RIGHT, TRUE);
-                osk_mouse_button(tw->mouse, BTN_RIGHT, FALSE);
+                inject_click(tw, BTN_RIGHT);
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (is_tap && tw->max_touches == 1) {
                 /* 单指轻点 → 进入等待，350ms 内没第二下则发左键 */
@@ -341,9 +421,29 @@ static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     return TRUE;
 }
 
-TouchpadWidget *touchpad_widget_new(OskMouse *mouse) {
+/* 销毁时撤掉未到期的定时器。
+ * 点击穿透引入了两个延时源（注入前、恢复前），
+ * 不清理的话到期时会解引用已释放的 tw。 */
+static void touchpad_free(gpointer data) {
+    TouchpadWidget *tw = data;
+    if (!tw) return;
+
+    if (tw->tap_timer)       { g_source_remove(tw->tap_timer);       tw->tap_timer = 0; }
+    if (tw->click_delay_id)  { g_source_remove(tw->click_delay_id);  tw->click_delay_id = 0; }
+    if (tw->hole_restore_id) {
+        g_source_remove(tw->hole_restore_id);
+        tw->hole_restore_id = 0;
+        /* 洞还没恢复就被销毁：立刻恢复，否则输入区会一直留着缺口 */
+        if (tw->app) layout_restore_hole(tw->app);
+    }
+
+    g_free(tw);
+}
+
+TouchpadWidget *touchpad_widget_new(OskMouse *mouse, App *app) {
     TouchpadWidget *tw = g_new0(TouchpadWidget, 1);
     tw->mouse = mouse;
+    tw->app = app;
     tw->area = gtk_drawing_area_new();
     tw->tap_state = TAP_STATE_IDLE;
 
@@ -368,7 +468,12 @@ TouchpadWidget *touchpad_widget_new(OskMouse *mouse) {
     }
 
     g_object_set_data_full(G_OBJECT(tw->area), "osk-touchpad",
-                           tw, (GDestroyNotify)g_free);
+                           tw, touchpad_free);
+
+    /* 告诉 layout 的输入区收集器：这块自绘区域要吃指针/触摸事件。
+     * 否则游戏布局（透明 + 穿透）下点上去会直接落到桌面，触控板没法用。 */
+    g_object_set_data(G_OBJECT(tw->area), "osk-input", GINT_TO_POINTER(1));
+
     return tw;
 }
 

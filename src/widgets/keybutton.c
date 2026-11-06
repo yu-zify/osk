@@ -20,6 +20,14 @@ struct _KeyButton {
     gboolean pressed;
     gboolean fired;           /* 本次按下是否已经发过普通键 */
     gboolean swipe_triggered;
+
+    /* —— HOLD 模式（游戏布局用）——
+     * hold_mode 为真时走「按下即按住、松手才释放」的路径，
+     * 不触发连发、不响应上滑。 */
+    gboolean          hold_mode;
+    KeyButtonHoldFunc on_hold_press;
+    KeyButtonHoldFunc on_hold_release;
+    gboolean          hold_active;   /* 当前是否处于按下状态（防重复释放） */
 };
 
 static KeyButton *g_active = NULL;
@@ -33,6 +41,22 @@ static void key_button_reset(KeyButton *kb) {
     if (kb->repeat_timer) { g_source_remove(kb->repeat_timer); kb->repeat_timer = 0; }
     kb->fired = FALSE;
 
+    /* 按压反馈类：无论走哪条路径结束，都统一在这里清掉。
+     * 放在 reset 里而不是各个回调里，是因为结束路径有多条
+     * （正常松手、手势取消、切布局），漏一处就会卡在白色。 */
+    gtk_style_context_remove_class(
+        gtk_widget_get_style_context(kb->button), "key-pressed");
+
+    /* HOLD 模式还在按住时被复位（切布局/窗口失焦）：
+     * 必须补一次 release，否则这个键会永远停在按下状态 */
+    if (kb->hold_active) {
+        kb->hold_active = FALSE;
+        gtk_style_context_remove_class(
+            gtk_widget_get_style_context(kb->button), "key-held");
+        if (kb->on_hold_release)
+            kb->on_hold_release(kb->def, kb->user_data);
+    }
+
     if (kb->swipe_triggered) {
         kb->swipe_triggered = FALSE;
         gtk_style_context_remove_class(
@@ -45,6 +69,18 @@ static void key_button_reset(KeyButton *kb) {
 
 void key_button_stop_repeat(KeyButton *kb) {
     key_button_reset(kb);
+}
+
+void key_button_set_hold_mode(KeyButton *kb,
+                               KeyButtonHoldFunc on_press,
+                               KeyButtonHoldFunc on_release) {
+    if (!kb) return;
+    kb->hold_mode      = TRUE;
+    kb->on_hold_press  = on_press;
+    kb->on_hold_release = on_release;
+
+    /* 游戏键不显示上滑角标：没有上滑功能，显示了反而误导 */
+    key_button_set_up_labels(kb, NULL, NULL, FALSE);
 }
 
 /* 创建一个叠加标签 */
@@ -120,6 +156,25 @@ static void on_gesture_begin(GtkGesture *g, GdkEventSequence *seq,
     kb->swipe_triggered = FALSE;
     g_active            = kb;
 
+    /* HOLD 模式：按下立刻生效，不排连发定时器。
+     * 游戏要的是「按住多久就按住多久」，连发反而会干扰。 */
+    if (kb->hold_mode) {
+        kb->hold_active = TRUE;
+        gtk_style_context_add_class(
+            gtk_widget_get_style_context(kb->button), "key-held");
+        if (kb->on_hold_press)
+            kb->on_hold_press(kb->def, kb->user_data);
+        return;
+    }
+
+    /* 普通按键：加一个按压类做视觉反馈。
+     *
+     * 不能用 CSS 的 :active 伪类 —— KeyButton 的壳是 GtkEventBox，
+     * 它没有 :active 状态，那条规则永远不会命中。
+     * 所以由手势自己维护这个类。 */
+    gtk_style_context_add_class(
+        gtk_widget_get_style_context(kb->button), "key-pressed");
+
     kb->repeat_delay = g_timeout_add(REPEAT_DELAY_MS, repeat_begin, kb);
 }
 
@@ -127,6 +182,18 @@ static void on_gesture_end(GtkGesture *g, GdkEventSequence *seq,
                            gpointer data) {
     (void)g; (void)seq;
     KeyButton *kb = data;
+
+    if (kb->hold_mode) {
+        if (kb->hold_active) {
+            kb->hold_active = FALSE;
+            gtk_style_context_remove_class(
+                gtk_widget_get_style_context(kb->button), "key-held");
+            if (kb->on_hold_release)
+                kb->on_hold_release(kb->def, kb->user_data);
+        }
+        key_button_stop_repeat(kb);
+        return;
+    }
 
     /* 松手时如果这次按下还没发过普通键（既没有走重复，也没有上滑），
      * 才补发一次普通键，避免长按重复后松手再补一次 */
@@ -141,13 +208,27 @@ static void on_gesture_end(GtkGesture *g, GdkEventSequence *seq,
 static void on_gesture_cancel(GtkGesture *g, GdkEventSequence *seq,
                               gpointer data) {
     (void)g; (void)seq;
-    key_button_stop_repeat(data);
+    KeyButton *kb = data;
+
+    /* 手势被取消（比如窗口失焦）时也必须补一次 release，
+     * 否则那一瞬间按住的键会永远停在按下状态。 */
+    if (kb->hold_mode && kb->hold_active) {
+        kb->hold_active = FALSE;
+        gtk_style_context_remove_class(
+            gtk_widget_get_style_context(kb->button), "key-held");
+        if (kb->on_hold_release)
+            kb->on_hold_release(kb->def, kb->user_data);
+    }
+    key_button_stop_repeat(kb);
 }
 
 static void on_drag_update(GtkGestureDrag *g, gdouble ox, gdouble oy,
                            gpointer data) {
     (void)g;
     KeyButton *kb = data;
+
+    /* HOLD 模式不支持上滑：游戏键一个键一个功能，上滑只会误触 */
+    if (kb->hold_mode) return;
 
     if (!kb->pressed || kb->swipe_triggered) return;
     if (!kb->def->up_code) return;

@@ -15,6 +15,10 @@ typedef enum {
     KEY_ACTION_EMIT,      /* 发送 code */
     KEY_ACTION_MODIFIER,  /* 切换修饰状态，不发事件 */
     KEY_ACTION_COMMAND,   /* 触发应用命令 */
+    /* 以下用于游戏布局的「真实长按」语义：
+     * 按下时发按下事件、松手时发抬起事件，中间保持住。 */
+    KEY_ACTION_GAMEPAD_BTN, /* 手柄按键：code 是 BTN_SOUTH 之类 */
+    KEY_ACTION_MOUSE_BTN,   /* 鼠标按键：code 是 BTN_LEFT 之类 */
 } KeyAction;
 
 typedef struct {
@@ -51,5 +55,13 @@ typedef struct {
 #define OSK_MOD_CAPS  (1u << 4)
 
 const KeyDef *keylib_get(const char *id);
+
+/* 遍历内置键表。
+ * 编辑面板的「按键映射」下拉菜单需要把所有可绑定的键列出来，
+ * count 返回条目数；返回的数组由 keylib 静态持有，不要释放。
+ *
+ * 注意：返回的表里包含 page 这类控件键（KEY_ACTION_COMMAND），
+ * 调用方如果只想列真正能发按键的，需自行过滤 action 字段。 */
+const KeyDef *keylib_all(gsize *count);
 
 #endif
