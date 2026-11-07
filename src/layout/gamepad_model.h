@@ -24,6 +24,7 @@ typedef enum {
     GP_ITEM_STICK_L,    /* 左摇杆 */
     GP_ITEM_STICK_R,    /* 右摇杆 */
     GP_ITEM_TOUCHPAD,   /* 触控板（鼠标模拟） */
+    GP_ITEM_WHEEL,      /* 滚轮条：手指沿竖条上下滑 = 鼠标滚轮滚动 */
 } GpItemType;
 
 /* 摇杆的四方向绑定。

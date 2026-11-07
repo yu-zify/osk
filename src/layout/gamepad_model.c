@@ -204,6 +204,7 @@ static const char *type_to_str(GpItemType t) {
         case GP_ITEM_STICK_L:  return "stick_l";
         case GP_ITEM_STICK_R:  return "stick_r";
         case GP_ITEM_TOUCHPAD: return "touchpad";
+        case GP_ITEM_WHEEL:    return "wheel";
     }
     return "key";
 }
@@ -216,6 +217,7 @@ static GpItemType type_from_str(const char *s) {
     if (strcmp(s, "stick_l")  == 0) return GP_ITEM_STICK_L;
     if (strcmp(s, "stick_r")  == 0) return GP_ITEM_STICK_R;
     if (strcmp(s, "touchpad") == 0) return GP_ITEM_TOUCHPAD;
+    if (strcmp(s, "wheel")    == 0) return GP_ITEM_WHEEL;
     return GP_ITEM_KEY;
 }
 

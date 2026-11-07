@@ -49,11 +49,25 @@ struct _TouchpadWidget {
     gdouble  drag_start_x, drag_start_y;
     gint     max_touches;
 
-    /* 点击穿透的延时注入状态 */
-    guint      click_delay_id;    /* 挖洞后等待注入的定时器 */
+    /* 点击穿透的延时恢复状态。
+     * 注入是同步的，只有「恢复洞」需要延时。 */
     guint      hole_restore_id;   /* 注入后等待恢复的定时器 */
-    guint      pending_btn;       /* 待注入的按钮 */
 };
+
+/* 触控板指针速度。
+ *
+ * 从 app->config.mouse_speed 读取，而不是编译期常量 ——
+ * 用户在设置里调完要立刻生效，不能要求重启。
+ *
+ * 没有 app 引用时（独立使用控件）退回 1.0。 */
+static gdouble move_speed(TouchpadWidget *tw) {
+    if (tw->app) {
+        gdouble s = tw->app->config.mouse_speed;
+        if (s >= OSK_MOUSE_SPEED_MIN && s <= OSK_MOUSE_SPEED_MAX)
+            return s;
+    }
+    return OSK_MOUSE_SPEED_DEFAULT;
+}
 
 /* ===== 点击穿透 =====
  *
@@ -68,7 +82,6 @@ struct _TouchpadWidget {
  * 两个延时都是用户无感的量级（毫秒级），但能显著提高成功率。
  */
 
-#define CLICK_PUNCH_DELAY_MS   25   /* 挖洞后等合成器处理，再注入 */
 #define CLICK_RESTORE_DELAY_MS 80   /* 注入后保持洞，避免恢复早于点击 */
 
 /* 注入后延时恢复 */
@@ -80,27 +93,20 @@ static gboolean restore_hole_tick(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-/* 真正执行注入，并安排恢复 */
-static gboolean inject_click_tick(gpointer data) {
-    TouchpadWidget *tw = data;
-    tw->click_delay_id = 0;
-
-    osk_mouse_button(tw->mouse, tw->pending_btn, TRUE);
-    osk_mouse_button(tw->mouse, tw->pending_btn, FALSE);
-
-    if (tw->app) {
-        if (tw->hole_restore_id)
-            g_source_remove(tw->hole_restore_id);
-        tw->hole_restore_id = g_timeout_add(CLICK_RESTORE_DELAY_MS,
-                                             restore_hole_tick, tw);
-    }
-    return G_SOURCE_REMOVE;
-}
-
 /* 注入一次点击，必要时先挖洞。
  *
  * 所有点击注入都走这里，替代直接调用 osk_mouse_button。
- * 没有 app 引用时（独立使用触控板控件）退化为立即注入，行为与以前一致。 */
+ * 没有 app 引用时（独立使用触控板控件）退化为立即注入，行为与以前一致。
+ *
+ * ===== 关于延迟 =====
+ *
+ * 早先这里在挖洞后等了 25ms 才注入，理由是「等合成器处理 region」。
+ * 但 layout_punch_hole() 内部是同步调用
+ * gdk_window_input_shape_combine_region 的，region 立刻提交，
+ * 那 25ms 完全是白等 —— 每次点击都白白多出四十分之一秒。
+ *
+ * 现在改为：挖洞后立即注入，只保留注入后的 80ms 恢复延时
+ * （那个是必要的：恢复早于点击处理会导致点击被 OSK 吃掉）。 */
 static void inject_click(TouchpadWidget *tw, guint button) {
     if (!tw || !tw->mouse) return;
 
@@ -111,17 +117,17 @@ static void inject_click(TouchpadWidget *tw, guint button) {
         return;
     }
 
-    /* 上一轮还没注入的先取消，避免堆叠 */
-    if (tw->click_delay_id) {
-        g_source_remove(tw->click_delay_id);
-        tw->click_delay_id = 0;
-    }
-
+    /* 挖洞（同步生效），然后立刻注入 */
     layout_punch_hole(tw->app);
 
-    tw->pending_btn = button;
-    tw->click_delay_id = g_timeout_add(CLICK_PUNCH_DELAY_MS,
-                                        inject_click_tick, tw);
+    osk_mouse_button(tw->mouse, button, TRUE);
+    osk_mouse_button(tw->mouse, button, FALSE);
+
+    /* 保持洞 80ms 再恢复，确保点击已经送达下层应用 */
+    if (tw->hole_restore_id)
+        g_source_remove(tw->hole_restore_id);
+    tw->hole_restore_id = g_timeout_add(CLICK_RESTORE_DELAY_MS,
+                                         restore_hole_tick, tw);
 }
 
 
@@ -167,8 +173,10 @@ static void compute_mid(TouchpadWidget *tw, gdouble *mx, gdouble *my) {
 }
 
 static void emit_move(TouchpadWidget *tw, gdouble dx, gdouble dy) {
-    tw->accum_x += dx * SENSITIVITY;
-    tw->accum_y += dy * SENSITIVITY;
+    gdouble speed = move_speed(tw) * SENSITIVITY;
+
+    tw->accum_x += dx * speed;
+    tw->accum_y += dy * speed;
 
     gint ix = (gint)tw->accum_x;
     gint iy = (gint)tw->accum_y;
@@ -187,15 +195,28 @@ static void emit_move(TouchpadWidget *tw, gdouble dx, gdouble dy) {
         layout_note_cursor_move(tw->app, ix, iy);
 }
 
-/* ===== 轻点超时：发左键单击 ===== */
-
+/* ===== 轻点超时：已不再用于发左键 =====
+ *
+ * 原来单指轻点后会等 350ms（DOUBLE_TAP_TIMEOUT_MS）才发左键，
+ * 目的是识别「双击」——第二下如果位置接近就转成拖动。
+ *
+ * 但这让每次单击都有三分之一秒的延迟，手感很差。
+ * 现在改成「抬起立即发出左键」，双击的语义改为：
+ *   - 第一下：抬起即左键
+ *   - 第二下按住并移动：进入拖动（先补发按下）
+ * 这更接近真实触控板，也让单击零延迟。
+ *
+ * 这个定时器只保留用于「双击后的第二次点击判定窗口」，
+ * 不再阻塞第一次点击。 */
 static gboolean on_tap_timeout(gpointer data) {
     TouchpadWidget *tw = data;
     tw->tap_timer = 0;
-    if (tw->tap_state == TAP_STATE_SINGLE_WAIT) {
-        inject_click(tw, BTN_LEFT);
+
+    /* 超时后清掉「等待第二下」的状态。
+     * 此时左键早已发出，这里只是状态复位。 */
+    if (tw->tap_state == TAP_STATE_SINGLE_WAIT)
         tw->tap_state = TAP_STATE_IDLE;
-    }
+
     return G_SOURCE_REMOVE;
 }
 
@@ -234,8 +255,12 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 tw->drag_start_x = te->x;
                 tw->drag_start_y = te->y;
             } else {
-                /* 位置太远 → 第一次的单击立刻发出 */
-                inject_click(tw, BTN_LEFT);
+                /* 位置太远 → 视为新的一次独立点击。
+                 *
+                 * 注意这里不能再 inject_click：第一次点击已经在
+                 * TOUCH_END 时发过了（改成零延迟后如此）。
+                 * 这里只把状态复位，等这次抬起时自然走正常的
+                 * 「单击」分支。 */
                 tw->tap_state = TAP_STATE_IDLE;
             }
         } else if (tw->n_active == 2) {
@@ -325,7 +350,7 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 osk_mouse_button(tw->mouse, BTN_LEFT, FALSE);
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (tw->tap_state == TAP_STATE_DRAG_PENDING) {
-                /* 第二下没移动就松开 → 视为左键单击 */
+                /* 第二下没移动就松开 → 再补一次单击 */
                 inject_click(tw, BTN_LEFT);
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (is_tap && tw->max_touches >= 2) {
@@ -333,7 +358,16 @@ static gboolean on_touch_event(GtkWidget *w, GdkEvent *ev, gpointer data) {
                 inject_click(tw, BTN_RIGHT);
                 tw->tap_state = TAP_STATE_IDLE;
             } else if (is_tap && tw->max_touches == 1) {
-                /* 单指轻点 → 进入等待，350ms 内没第二下则发左键 */
+                /* 单指轻点 → 立刻发出左键。
+                 *
+                 * 这里不再等 DOUBLE_TAP_TIMEOUT_MS。原来的实现要等
+                 * 350ms 才能确定「不是双击」，导致每次单击都有明显延迟。
+                 * 现在抬起即点击，双击的第二下会走 DRAG_PENDING 分支
+                 * 处理成拖动或再补一次点击。 */
+                inject_click(tw, BTN_LEFT);
+
+                /* 仍然进入 SINGLE_WAIT，让 350ms 内的第二下能被
+                 * 识别为「双击/拖动」而不是又一次单击。 */
                 tw->tap_state = TAP_STATE_SINGLE_WAIT;
                 tw->tap_x = te->x;
                 tw->tap_y = te->y;
@@ -429,7 +463,6 @@ static void touchpad_free(gpointer data) {
     if (!tw) return;
 
     if (tw->tap_timer)       { g_source_remove(tw->tap_timer);       tw->tap_timer = 0; }
-    if (tw->click_delay_id)  { g_source_remove(tw->click_delay_id);  tw->click_delay_id = 0; }
     if (tw->hole_restore_id) {
         g_source_remove(tw->hole_restore_id);
         tw->hole_restore_id = 0;

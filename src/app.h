@@ -42,6 +42,7 @@ typedef struct {
     gint    key_spacing;      /* 按键间距 */
     gdouble opacity;          /* 键盘整体不透明度 0.2 ~ 1.0 */
     gdouble pad_opacity;      /* 触控板窗口不透明度 0.2 ~ 1.0 */
+    gdouble mouse_speed;      /* 触控板指针移动倍率 0.2 ~ 4.0 */
     gint    font_size;        /* 按键主标签字号（像素） */
     gint    corner_font_size; /* 右上角上滑字符字号（像素） */
 } OskConfig;
@@ -69,6 +70,11 @@ typedef struct {
 #define OSK_CORNER_FONT_SIZE_MAX       40
 #define OSK_OPACITY_MIN               0.2
 #define OSK_OPACITY_MAX               1.0
+
+/* 触控板指针速度（倍率）。1.0 是基准，越大越快。 */
+#define OSK_MOUSE_SPEED_DEFAULT       1.0
+#define OSK_MOUSE_SPEED_MIN           0.2
+#define OSK_MOUSE_SPEED_MAX           4.0
 
 /* 具名标签：其他头文件（如 touchpad.h）需要前向声明 App 时
  * 用 struct _App，与这里的定义保持一致。 */

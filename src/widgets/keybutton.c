@@ -28,6 +28,12 @@ struct _KeyButton {
     KeyButtonHoldFunc on_hold_press;
     KeyButtonHoldFunc on_hold_release;
     gboolean          hold_active;   /* 当前是否处于按下状态（防重复释放） */
+
+    /* 按住拖拽（见 key_button_set_hold_drag）。
+     * 上一帧的拖拽点在控件里记录，回调拿到的已经是每帧增量。 */
+    KeyButtonHoldDragFunc on_hold_drag;
+    gdouble               hold_last_x, hold_last_y;
+    gboolean              hold_has_last;
 };
 
 static KeyButton *g_active = NULL;
@@ -81,6 +87,12 @@ void key_button_set_hold_mode(KeyButton *kb,
 
     /* 游戏键不显示上滑角标：没有上滑功能，显示了反而误导 */
     key_button_set_up_labels(kb, NULL, NULL, FALSE);
+}
+
+void key_button_set_hold_drag(KeyButton *kb,
+                               KeyButtonHoldDragFunc on_drag) {
+    if (!kb) return;
+    kb->on_hold_drag = on_drag;
 }
 
 /* 创建一个叠加标签 */
@@ -148,7 +160,10 @@ static void on_gesture_begin(GtkGesture *g, GdkEventSequence *seq,
     (void)g; (void)seq;
     KeyButton *kb = data;
 
-    if (g_active && g_active != kb)
+    /* g_active 是普通键盘「单活动键」模型（连发/上滑同一时刻只认一个键）。
+     * 游戏 HOLD 键是真实按键语义，多个键必须能同时按住 ——
+     * 按住 Ctrl 再按 C 就是 Ctrl+C，绝不能把别人按住的键放掉。 */
+    if (g_active && g_active != kb && !kb->hold_mode)
         key_button_stop_repeat(g_active);
 
     kb->pressed         = TRUE;
@@ -160,6 +175,7 @@ static void on_gesture_begin(GtkGesture *g, GdkEventSequence *seq,
      * 游戏要的是「按住多久就按住多久」，连发反而会干扰。 */
     if (kb->hold_mode) {
         kb->hold_active = TRUE;
+        kb->hold_has_last = FALSE;   /* 拖拽参考点复位 */
         gtk_style_context_add_class(
             gtk_widget_get_style_context(kb->button), "key-held");
         if (kb->on_hold_press)
@@ -186,6 +202,7 @@ static void on_gesture_end(GtkGesture *g, GdkEventSequence *seq,
     if (kb->hold_mode) {
         if (kb->hold_active) {
             kb->hold_active = FALSE;
+            kb->hold_has_last = FALSE;
             gtk_style_context_remove_class(
                 gtk_widget_get_style_context(kb->button), "key-held");
             if (kb->on_hold_release)
@@ -214,6 +231,7 @@ static void on_gesture_cancel(GtkGesture *g, GdkEventSequence *seq,
      * 否则那一瞬间按住的键会永远停在按下状态。 */
     if (kb->hold_mode && kb->hold_active) {
         kb->hold_active = FALSE;
+        kb->hold_has_last = FALSE;
         gtk_style_context_remove_class(
             gtk_widget_get_style_context(kb->button), "key-held");
         if (kb->on_hold_release)
@@ -227,8 +245,26 @@ static void on_drag_update(GtkGestureDrag *g, gdouble ox, gdouble oy,
     (void)g;
     KeyButton *kb = data;
 
-    /* HOLD 模式不支持上滑：游戏键一个键一个功能，上滑只会误触 */
-    if (kb->hold_mode) return;
+    /* HOLD 模式：拖动不是上滑，而是「按住拖拽」——
+     * 把手指每帧位移交给回调（游戏布局鼠标键拖指针用）。
+     * 用手势而不是 motion-notify-event 的原因见 keybutton.h。 */
+    if (kb->hold_mode) {
+        if (kb->hold_active && kb->on_hold_drag) {
+            gdouble dx = 0, dy = 0;
+
+            if (kb->hold_has_last) {
+                dx = ox - kb->hold_last_x;
+                dy = oy - kb->hold_last_y;
+            }
+            kb->hold_last_x = ox;
+            kb->hold_last_y = oy;
+            kb->hold_has_last = TRUE;
+
+            if (dx != 0.0 || dy != 0.0)
+                kb->on_hold_drag(kb->def, dx, dy, kb->user_data);
+        }
+        return;
+    }
 
     if (!kb->pressed || kb->swipe_triggered) return;
     if (!kb->def->up_code) return;

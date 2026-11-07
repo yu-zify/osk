@@ -8,6 +8,7 @@ typedef struct {
     /* 控件 */
     GtkWidget *scale_opacity;
     GtkWidget *scale_pad_opacity;
+    GtkWidget *scale_mouse_speed;
     GtkWidget *spin_width;
     GtkWidget *spin_height;
     GtkWidget *spin_spacing;
@@ -15,6 +16,7 @@ typedef struct {
     GtkWidget *spin_corner;
     GtkWidget *lbl_opacity;
     GtkWidget *lbl_pad_opacity;
+    GtkWidget *lbl_mouse_speed;
     GtkWidget *lbl_size;
 
     guint save_timeout;      /* 透明度滑块落盘用的延时源 */
@@ -67,6 +69,21 @@ static void on_pad_opacity_changed(GtkRange *range, gpointer data) {
     app_apply_pad_config(ui->app);
 
     /* 与主透明度共用同一个落盘延时源 */
+    if (ui->save_timeout)
+        g_source_remove(ui->save_timeout);
+    ui->save_timeout = g_timeout_add(400, opacity_save_tick, ui);
+}
+
+/* 触控板指针速度。触控板控件每次都从 config 读，所以这里
+ * 只需更新 config 并落盘，不需要重建控件。 */
+static void on_mouse_speed_changed(GtkRange *range, gpointer data) {
+    SettingsUI *ui = data;
+    ui->app->config.mouse_speed = gtk_range_get_value(range);
+
+    char buf[32];
+    g_snprintf(buf, sizeof(buf), "%.2f×", ui->app->config.mouse_speed);
+    gtk_label_set_text(GTK_LABEL(ui->lbl_mouse_speed), buf);
+
     if (ui->save_timeout)
         g_source_remove(ui->save_timeout);
     ui->save_timeout = g_timeout_add(400, opacity_save_tick, ui);
@@ -129,6 +146,10 @@ static void on_reset(GtkButton *btn, gpointer data) {
 
     /* 默认值统一从 app.h 的那组宏取，不再各写一份数字 */
     gtk_range_set_value(GTK_RANGE(ui->scale_opacity), OSK_OPACITY_DEFAULT);
+    gtk_range_set_value(GTK_RANGE(ui->scale_pad_opacity),
+                         OSK_OPACITY_DEFAULT);
+    gtk_range_set_value(GTK_RANGE(ui->scale_mouse_speed),
+                         OSK_MOUSE_SPEED_DEFAULT);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_width),
                               OSK_KEY_WIDTH_DEFAULT);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_height),
@@ -262,6 +283,24 @@ void settings_open(App *app) {
                                          ui->scale_pad_opacity, lbl_pad),
                        FALSE, FALSE, 0);
 
+    /* --- 指针速度 ---
+     * 影响触控板拖动时指针移动的倍率。1.00× 是基准。 */
+    GtkWidget *lbl_speed = gtk_label_new("");
+    ui->lbl_mouse_speed = lbl_speed;
+    ui->scale_mouse_speed = gtk_scale_new_with_range(
+        GTK_ORIENTATION_HORIZONTAL,
+        OSK_MOUSE_SPEED_MIN, OSK_MOUSE_SPEED_MAX, 0.05);
+    gtk_scale_set_value_pos(GTK_SCALE(ui->scale_mouse_speed), GTK_POS_LEFT);
+    gtk_range_set_value(GTK_RANGE(ui->scale_mouse_speed),
+                         app->config.mouse_speed);
+    gtk_widget_set_hexpand(ui->scale_mouse_speed, TRUE);
+    g_signal_connect(ui->scale_mouse_speed, "value-changed",
+                     G_CALLBACK(on_mouse_speed_changed), ui);
+    gtk_box_pack_start(GTK_BOX(box),
+                       make_labeled_row("指针速度",
+                                         ui->scale_mouse_speed, lbl_speed),
+                       FALSE, FALSE, 0);
+
     gtk_box_pack_start(GTK_BOX(box),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);
@@ -328,6 +367,8 @@ void settings_open(App *app) {
 
     /* 初始文案 */
     on_opacity_changed(GTK_RANGE(ui->scale_opacity), ui);
+    on_pad_opacity_changed(GTK_RANGE(ui->scale_pad_opacity), ui);
+    on_mouse_speed_changed(GTK_RANGE(ui->scale_mouse_speed), ui);
     {
         char buf[64];
         g_snprintf(buf, sizeof(buf), "%d × %d  间距 %d",

@@ -16,9 +16,12 @@
 
 static App g_app = {0};
 
-/* 前向声明：app_set_layout 里会用到 */
+/* 前向声明：app_set_layout / 重生成窗口 里会用到 */
 static void update_page_button(App *app);
 static void apply_borderless(App *app);
+static void on_window_destroy(GtkWidget *widget, gpointer user_data);
+static void create_main_window(App *app);
+static void show_main_window(App *app);
 
 /* ===== 拖动窗口用的辅助 ===== */
 
@@ -41,21 +44,76 @@ static gboolean on_drag_begin(GtkWidget *w, GdkEventButton *ev, gpointer data) {
  * 全屏/游戏这类穿透布局交给窗口管理器，不参与。 */
 static guint g_fit_idle = 0;
 
-static gboolean fit_window_idle(gpointer data) {
-    g_fit_idle = 0;
-    App *app = data;
-    if (!app || !app->window || !app->layout) return G_SOURCE_REMOVE;
-    if (app->layout->transparent) return G_SOURCE_REMOVE;
+/* ===== resize 必须等 unmaximize 完成 =====
+ *
+ * 切出游戏布局时先调 gtk_window_unmaximize()，那是异步请求：
+ * KWin 要经过一轮 configure 往返（通常还带还原动画）才真正还原。
+ * 以前这里固定等 30ms 就 gtk_window_resize()，还原没完成时 resize
+ * 会和还原在合成器侧竞争，还原几何可能被按错误锚点结算 ——
+ * 窗口（顶栏所在的上边）有概率跑到屏幕外，无边框窗口顶栏够不着
+ * 就再也没法拖动了。
+ *
+ * 所以 resize 前确认窗口已退出最大化：仍在最大化状态就继续等。
+ * 等待有上限（40ms × 50 ≈ 2s），超时后退回旧行为照常 resize，
+ * 避免 WM 异常时窗口永远停留在错误尺寸；真正还原完成时
+ * on_window_state 还会再补一次 fit 兜底。 */
+#define FIT_WAIT_MS        40
+#define FIT_WAIT_MAX_TICKS 50
 
+static guint g_fit_wait_ticks = 0;
+
+/* ===== 重生成后的盯守（app_replace_placement）=====
+ * 理论上 unrealize/realize 出来的新窗口不可能是最大化的，
+ * 但实测某些环境里它仍被顶回全屏。盯守 1.5 秒：
+ * 发现新窗口处于最大化（而当前是普通布局）就立刻纠正。 */
+#define REPLACE_WATCH_MS    100
+#define REPLACE_WATCH_TICKS 15    /* 100ms × 15 ≈ 1.5s */
+#define REPLACE_FIX_MAX     5     /* 最多纠正次数，防止与 WM 死循环 */
+
+static guint    g_replace_watch      = 0;
+static gint     g_replace_watch_left = 0;
+static gint     g_replace_fixes      = 0;
+static gboolean g_replace_fixed      = FALSE;
+static guint    g_replace_idle       = 0;
+
+static void center_window_x11(App *app);
+static gboolean replace_watch_tick(gpointer data);
+
+static void fit_window_resize(App *app) {
     GtkWidget *content = gtk_bin_get_child(GTK_BIN(app->window));
-    if (!content) return G_SOURCE_REMOVE;
+    if (!content) return;
 
     GtkRequisition nat;
     gtk_widget_get_preferred_size(content, NULL, &nat);
     if (nat.width  < 1) nat.width  = 1;
     if (nat.height < 1) nat.height = 1;
 
+    /* 尺寸已经一致就不必再请求一次 resize，减少与 WM 的往返 */
+    gint cw = 0, ch = 0;
+    gtk_window_get_size(GTK_WINDOW(app->window), &cw, &ch);
+    if (cw == nat.width && ch == nat.height) return;
+
+    g_print("[OSK] fit：窗口 %dx%d → %dx%d\n",
+            cw, ch, nat.width, nat.height);
     gtk_window_resize(GTK_WINDOW(app->window), nat.width, nat.height);
+}
+
+static gboolean fit_window_idle(gpointer data) {
+    App *app = data;
+    g_fit_idle = 0;
+
+    if (!app || !app->window || !app->layout) return G_SOURCE_REMOVE;
+    if (app->layout->transparent) return G_SOURCE_REMOVE;
+
+    /* WM 还没确认解除最大化：继续等，绝不能在这个状态下 resize */
+    if (gtk_window_is_maximized(GTK_WINDOW(app->window)) &&
+        ++g_fit_wait_ticks < FIT_WAIT_MAX_TICKS) {
+        g_fit_idle = g_timeout_add(FIT_WAIT_MS, fit_window_idle, app);
+        return G_SOURCE_REMOVE;
+    }
+    g_fit_wait_ticks = 0;
+
+    fit_window_resize(app);
     return G_SOURCE_REMOVE;
 }
 
@@ -63,8 +121,164 @@ static void schedule_fit(App *app) {
     if (!app || !app->layout) return;
     if (app->layout->transparent) return;   /* 穿透布局不跟着收缩 */
     if (g_fit_idle) g_source_remove(g_fit_idle);
+    g_fit_wait_ticks = 0;
     /* 稍等一拍，让新布局完成分配后再量尺寸 */
     g_fit_idle = g_timeout_add(30, fit_window_idle, app);
+}
+
+/* ===== 从铺满布局（游戏）返回时重新放置窗口 =====
+ *
+ * 为什么不信任 unmaximize 的还原结果：
+ *   Wayland 下客户端没有窗口定位权，unmaximize 还原到哪全由
+ *   KWin 决定，实测有概率把窗口顶栏放到屏幕外 —— 无边框窗口
+ *   顶栏够不着，用户就再也无法拖动了。
+ *
+ * 做法：干脆地换一个全新的 GtkWindow 对象。
+ *
+ *   藏起旧窗口 → （空闲时）建全新 GtkWindow → 装入当前布局
+ *   → 调好尺寸 → show → X11 精确居中 → 销毁旧窗口
+ *
+ * 之前试过 hide+show、unrealize/realize，新窗口仍被顶回全屏：
+ *   unrealize 能销毁 X11 的 X 窗口/_NET_WM_STATE、Wayland 的
+ *   wl_surface/xdg_toplevel 和 GTK 后端缓存，但 **GtkWindow
+ *   对象自身的 widget 级标志（maximize_initially 等）活了下来**，
+ *   在这套环境里 show 时仍把窗口顶回最大化（连发五次
+ *   unmaximize 都被压回去，日志可证）。所以这次连对象一起换：
+ *   全新对象的一切标志天然是 FALSE，什么状态都带不过来。
+ *
+ * app_set_layout 在切出铺满布局时先把旧窗口藏掉并挂一个空闲
+ * 回调（replace_idle），菜单信号栈完全退空后才真正重建，
+ * 避免「全屏窗口里装着新布局」的中间态。
+ *
+ * show 之后仍有 1.5 秒盯守（replace_watch_tick）：万一还有
+ * 什么东西把新窗口顶回最大化（比如 KWin 窗口规则），立刻纠正；
+ * 反复纠正无效时打日志提示用户检查窗口规则。 */
+
+/* 空闲回调：菜单/按钮的信号栈退空后再动窗口 */
+static gboolean replace_idle(gpointer data) {
+    App *app = data;
+    GtkWidget *old;
+
+    g_replace_idle = 0;
+    if (!app || !app->window) return G_SOURCE_REMOVE;
+
+    old = app->window;
+    g_print("[OSK] 重生成窗口：旧窗口 maximized=%d\n",
+            gtk_window_is_maximized(GTK_WINDOW(old)) ? 1 : 0);
+
+    /* 全新 GtkWindow 对象：app->window / 顶栏 / 布局挂载点
+     * 全部换成新的（回调里捕获的窗口指针随 build_toolbar 重建） */
+    create_main_window(app);
+
+    /* 当前布局装进新窗口 */
+    app_rebuild_layout(app);
+    show_main_window(app);
+
+    /* 立刻按内容定好尺寸，不等 30ms 定时器 */
+    if (g_fit_idle) {
+        g_source_remove(g_fit_idle);
+        g_fit_idle = 0;
+    }
+    g_fit_wait_ticks = 0;
+    fit_window_resize(app);
+
+    /* 旧窗口退场：摘掉「销毁即退出程序」的处理器再销毁 */
+    g_signal_handlers_disconnect_by_func(old,
+                                         G_CALLBACK(on_window_destroy),
+                                         NULL);
+    gtk_widget_destroy(old);
+
+    {
+        gint cw = 0, ch = 0;
+        gtk_window_get_size(GTK_WINDOW(app->window), &cw, &ch);
+        g_print("[OSK] 重生成窗口：新窗口 size=%dx%d maximized=%d\n",
+                cw, ch,
+                gtk_window_is_maximized(GTK_WINDOW(app->window)) ? 1 : 0);
+    }
+
+    /* 启动盯守：1.5 秒内发现被顶回最大化就立刻纠正 */
+    g_replace_fixes      = 0;
+    g_replace_fixed      = FALSE;
+    g_replace_watch_left = REPLACE_WATCH_TICKS;
+    if (g_replace_watch)
+        g_source_remove(g_replace_watch);
+    g_replace_watch = g_timeout_add(REPLACE_WATCH_MS,
+                                    replace_watch_tick, app);
+
+    center_window_x11(app);
+    return G_SOURCE_REMOVE;
+}
+
+/* 对外入口：切出铺满布局时调用。推迟到空闲执行，
+ * 让当前的菜单/按钮信号处理完全走完。 */
+static void app_replace_placement(App *app) {
+    if (!app || !app->window) return;
+    if (g_replace_idle)
+        g_source_remove(g_replace_idle);
+    g_replace_idle = g_idle_add(replace_idle, app);
+}
+static void center_window_x11(App *app) {
+#ifdef GDK_WINDOWING_X11
+    GdkWindow *gw;
+    GdkDisplay *display;
+    GdkMonitor *monitor;
+    GdkRectangle wa;
+    gint w = 0, h = 0, x, y;
+
+    if (!app || !app->window) return;
+    gw = gtk_widget_get_window(app->window);
+    if (!gw || !GDK_IS_X11_WINDOW(gw)) return;
+
+    display = gtk_widget_get_display(app->window);
+    monitor = gdk_display_get_monitor_at_window(display, gw);
+    gdk_monitor_get_workarea(monitor, &wa);
+
+    gtk_window_get_size(GTK_WINDOW(app->window), &w, &h);
+    x = wa.x + (wa.width  - w) / 2;
+    y = wa.y + (wa.height - h) / 2;
+    if (x < wa.x) x = wa.x;
+    if (y < wa.y) y = wa.y;
+    gtk_window_move(GTK_WINDOW(app->window), x, y);
+#else
+    (void)app;
+#endif
+}
+
+/* 盯守：发现新窗口仍（或又被）最大化就立刻纠正 */
+static gboolean replace_watch_tick(gpointer data) {
+    App *app = data;
+
+    if (!app || !app->window || !app->layout || app->layout->transparent) {
+        g_replace_watch = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    if (gtk_window_is_maximized(GTK_WINDOW(app->window))) {
+        if (g_replace_fixes < REPLACE_FIX_MAX) {
+            g_replace_fixes++;
+            g_replace_fixed = TRUE;
+            g_print("[OSK] 重生成后窗口仍是最大化（第 %d 次纠正）\n",
+                    g_replace_fixes);
+            gtk_window_unmaximize(GTK_WINDOW(app->window));
+        } else {
+            g_print("[OSK] 窗口反复回到最大化，放弃纠正 ——"
+                    "请检查 KWin 窗口规则是否对该窗口强制最大化\n");
+            g_replace_watch = 0;
+            return G_SOURCE_REMOVE;
+        }
+    } else if (g_replace_fixed) {
+        /* 纠正生效：unmaximize 会还原到 KWin 自己的恢复位置，
+         * X11 下重新居中一次（Wayland 下是空操作） */
+        g_replace_fixed = FALSE;
+        center_window_x11(app);
+        g_print("[OSK] 窗口已纠正回普通尺寸\n");
+    }
+
+    if (--g_replace_watch_left <= 0) {
+        g_replace_watch = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
 }
 
 void app_rebuild_layout(App *app) {
@@ -107,7 +321,27 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
      * 不再改 type_hint —— 窗口的「无装饰」属性在建窗时就定好了，
      * 运行中再改角色反而可能把装饰带回来。 */
     gboolean passthrough = ops->transparent;
+    /* 从铺满（最大化）布局切回普通布局：WM 的还原几何不可信，
+     * 整个窗口换成全新的 GtkWindow 对象（见 app_replace_placement）。 */
+    gboolean leaving_fullscreen = (app->layout && app->layout->transparent &&
+                                   !passthrough);
+    if (leaving_fullscreen) {
+        /* 全屏旧窗口马上就要整个换掉：先藏起来，别让用户看到
+         * 「全屏窗口里装着新布局」的中间态。新窗口在空闲回调
+         * 里以全新 GtkWindow 对象重建。 */
+        gtk_widget_hide(app->window);
+        app_replace_placement(app);
+    }
     if (passthrough) {
+        /* 切入铺满布局：挂起的重生成与盯守不再需要 */
+        if (g_replace_idle) {
+            g_source_remove(g_replace_idle);
+            g_replace_idle = 0;
+        }
+        if (g_replace_watch) {
+            g_source_remove(g_replace_watch);
+            g_replace_watch = 0;
+        }
         gtk_window_set_skip_taskbar_hint(GTK_WINDOW(app->window), TRUE);
         gtk_window_set_keep_above(GTK_WINDOW(app->window), TRUE);
         gtk_window_maximize(GTK_WINDOW(app->window));
@@ -216,6 +450,28 @@ static gboolean on_window_configure(GtkWidget *w, GdkEventConfigure *ev,
     App *app = data;
     if (app->layout && app->layout->transparent)
         layout_apply_input_region_now(app);
+    return FALSE;
+}
+
+/* 窗口状态变化：退出最大化被 WM 确认后再补一次 fit。
+ *
+ * 正常流程下重生成（app_replace_placement）已经把窗口收拾好了，
+ * 这条是兜底：万一窗口被 KWin 规则等外因最大化/还原，
+ * 真正退出最大化时把窗口重新收缩到键盘尺寸。 */
+static gboolean on_window_state(GtkWidget *w, GdkEventWindowState *ev,
+                                gpointer data) {
+    (void)w;
+    App *app = data;
+    if (!app) return FALSE;
+    if (!(ev->changed_mask & GDK_WINDOW_STATE_MAXIMIZED)) return FALSE;
+
+    g_print("[OSK] 窗口状态：MAXIMIZED %s\n",
+            (ev->new_window_state & GDK_WINDOW_STATE_MAXIMIZED)
+                ? "置位" : "清除");
+
+    if (ev->new_window_state & GDK_WINDOW_STATE_MAXIMIZED) return FALSE;
+    if (app->layout && !app->layout->transparent)
+        schedule_fit(app);
     return FALSE;
 }
 
@@ -701,6 +957,104 @@ static GtkWidget *build_toolbar(App *app) {
     return bar;
 }
 
+/* ===== 主窗口构建 =====
+ *
+ * 从 main() 拆出来：切出游戏布局「重生成窗口」时也用它建一个
+ * 全新的 GtkWindow 对象 —— 对象自身的 widget 级标志
+ * （maximize_initially 等）是之前反复复活成最大化的元凶，
+ * 全新对象天然全 FALSE，任何历史状态都带不过来。 */
+static void create_main_window(App *app) {
+    GtkWidget *win;
+    GdkScreen *screen;
+    GdkVisual *visual;
+    GtkWidget *outer;
+    GtkWidget *toolbar;
+
+    win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(win), "OSK 屏幕键盘");
+    gtk_window_set_default_size(GTK_WINDOW(win), 800, 380);
+    gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
+
+    /* 隐藏标题栏。
+     *
+     * 关键：必须用 app_force_csd() 而不是直接 set_decorated(FALSE)。
+     *
+     * KWin 对 GTK 应用会强制服务端装饰（SSD），无视「不要装饰」的
+     * 请求（KDE Bug 484800）。给窗口设一个空 titlebar 后，GTK 会走
+     * CSD 路径，合成器放手，此时 set_decorated(FALSE) 才真正生效。
+     *
+     * 另外不设 type_hint：Wayland 下 DOCK/UTILITY 这些 X11 概念
+     * 没有直接对应，GTK 会挑一个近似的角色，反而可能让合成器
+     * 加上服务端装饰。保持默认的普通 toplevel 最稳。 */
+    app_force_csd(GTK_WINDOW(win));
+    gtk_window_set_resizable(GTK_WINDOW(win), TRUE);
+
+    g_signal_connect(win, "destroy",
+                     G_CALLBACK(on_window_destroy), NULL);
+    /* map 时再摘一次装饰，兼容会在显示时补边框的窗口管理器 */
+    g_signal_connect(win, "map-event",
+                     G_CALLBACK(on_window_map), NULL);
+    g_signal_connect(win, "size-allocate",
+                     G_CALLBACK(on_window_size_allocate), app);
+    g_signal_connect(win, "configure-event",
+                     G_CALLBACK(on_window_configure), app);
+    g_signal_connect(win, "window-state-event",
+                     G_CALLBACK(on_window_state), app);
+
+    screen = gtk_widget_get_screen(win);
+    visual = gdk_screen_get_rgba_visual(screen);
+    if (visual && gdk_screen_is_composited(screen))
+        gtk_widget_set_visual(win, visual);
+    gtk_widget_set_app_paintable(win, TRUE);
+
+    gtk_style_context_add_class(gtk_widget_get_style_context(win),
+                                "osk-window");
+
+    /* 必须先换成新窗口指针再建顶栏：build_toolbar 会把
+     * app->window 捕获进拖动区/最小化按钮的回调数据 */
+    app->window = win;
+
+    /* 外层容器 + 布局挂载点 */
+    outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(win), outer);
+
+    /* 白边用 cairo 自绘（CSS 方案会影响弹出菜单，见 app_attach_border）。
+     * 必须在外层容器建好之后调用 —— 它挂到子控件上，
+     * 子控件不存在时会退回到窗口本身，那样在 CSD 模式下画不出来。 */
+    app_attach_border(win);
+
+    toolbar = build_toolbar(app);
+    gtk_box_pack_start(GTK_BOX(outer), toolbar, FALSE, FALSE, 0);
+    /* 顶栏与白边错开 1px，和下面的按键区保持一致 */
+    gtk_widget_set_margin_start(toolbar, 1);
+    gtk_widget_set_margin_end(toolbar, 1);
+    gtk_widget_set_margin_top(toolbar, 1);
+
+    app->layout_host = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    /* 按键与白边之间留 1px：白边是画在 outer 外沿的描边，
+     * 内容整体内缩 1px 就不会压到线上。 */
+    gtk_widget_set_margin_start(app->layout_host, 1);
+    gtk_widget_set_margin_end(app->layout_host, 1);
+    gtk_widget_set_margin_top(app->layout_host, 0);
+    gtk_widget_set_margin_bottom(app->layout_host, 1);
+    gtk_widget_set_hexpand(app->layout_host, TRUE);
+    gtk_widget_set_vexpand(app->layout_host, TRUE);
+    gtk_box_pack_start(GTK_BOX(outer), app->layout_host, TRUE, TRUE, 0);
+}
+
+/* 显示主窗口并同步一次窗口相关状态（布局切换重建后同样走这里） */
+static void show_main_window(App *app) {
+    if (!app || !app->window) return;
+
+    gtk_widget_show_all(app->window);
+    /* show_all 之后换页按钮才真正显示，这时再同步一次它的状态 */
+    update_page_button(app);
+    /* 显示后再确认一次无边框（此时 GDK 窗口已创建） */
+    apply_borderless(app);
+    /* 透明度等外观配置是 widget 级的，新窗口要重新应用一次 */
+    app_apply_config(app);
+}
+
 /* ===== CSS ===== */
 
 static const char *app_css =
@@ -846,13 +1200,15 @@ static const char *app_css =
     ".osk-tool .osk-label-main {"
     "  font-size: 11px;"
     "}"
-    /* 布局切换按钮：圆形循环箭头 */
+    /* 布局切换按钮：圆形循环箭头。
+     * 布局切换（⟳）和鼠标/触控板（🖱）两个按钮共用这个类，
+     * 尺寸与其他顶栏按钮（min-height 30px）对齐。 */
     ".osk-tool.osk-cycle {"
-    "  min-width: 22px;"
-    "  min-height: 22px;"
+    "  min-width: 30px;"
+    "  min-height: 30px;"
     "  padding: 0;"
-    "  border-radius: 11px;"
-    "  font-size: 13px;"
+    "  border-radius: 15px;"
+    "  font-size: 16px;"
     "}"
     /* 按键：固定尺寸、圆角、立体感。
      *
@@ -1009,6 +1365,55 @@ static const char *app_css =
     ".osk-key.osk-transparent-key .osk-label-hint {"
     "  color: #c8ccd4;"
     "  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);"
+    "}"
+    /* 滚轮条：竖条形区域，手指沿条上下滑 = 鼠标滚轮滚动 */
+    ".osk-wheel-strip {"
+    "  background-color: rgba(28,31,36,0.55);"
+    "  border: 1px solid rgba(255, 255, 255, 0.30);"
+    "  border-radius: 12px;"
+    "}"
+    ".osk-wheel-strip label {"
+    "  color: #ffffff;"
+    "  font-size: 14px;"
+    "  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);"
+    "}"
+    /* —— 按键状态反馈的层叠保障（必须放在表尾） ——
+     *
+     * GTK 的 CSS 等特异性时后写的规则赢，所以状态色要在表尾重申：
+     *   1. 修饰键处于 oneshot（蓝）时再按下去，白色按压反馈会被
+     *      更靠后的 mod-oneshot 规则盖掉 —— 表现为「Ctrl 按下没有
+     *      反馈色」；
+     *   2. 透明键（游戏布局）的 osk-transparent-key 背景规则在表内
+     *      最靠后，会把 key-held 的绿色反馈整个盖掉 —— 表现为
+     *      「游戏布局按键没有按住反馈」。 */
+    ".osk-key.key-pressed {"
+    "  background-color: #f2f5f9;"
+    "  background-image: none;"
+    "  border-color: #ffffff;"
+    "  color: #1a1d22;"
+    "  box-shadow: inset 0 2px 5px rgba(0,0,0,0.28),"
+    "              0 0 6px rgba(255,255,255,0.35);"
+    "}"
+    ".osk-key.key-pressed .osk-label-main,"
+    ".osk-key.key-pressed .osk-label-up,"
+    ".osk-key.key-pressed .osk-label-up-shift,"
+    ".osk-key.key-pressed .osk-label-hint {"
+    "  color: #1a1d22;"
+    "}"
+    /* 游戏布局透明键：按住绿色高亮（3 类特异性压过 2 类的底色规则） */
+    ".osk-key.osk-transparent-key.key-held {"
+    "  background-color: #2f8f4e;"
+    "  border-color: #57d07e;"
+    "  color: #ffffff;"
+    "  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25),"
+    "              0 0 8px rgba(87,208,126,0.55);"
+    "}"
+    /* 透明键按压瞬间的白色反馈（HOLD 键整个按住期间都算） */
+    ".osk-key.osk-transparent-key.key-pressed {"
+    "  background-color: #f2f5f9;"
+    "  background-image: none;"
+    "  border-color: #ffffff;"
+    "  color: #1a1d22;"
     "}";
 
 /* ===== 动态字号 =====
@@ -1109,65 +1514,8 @@ int main(int argc, char **argv) {
 
     g_app.key_buttons = g_ptr_array_new();
 
-    g_app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(g_app.window), "OSK 屏幕键盘");
-    gtk_window_set_default_size(GTK_WINDOW(g_app.window), 800, 380);
-    gtk_window_set_keep_above(GTK_WINDOW(g_app.window), TRUE);
-
-    /* 隐藏标题栏。
-     *
-     * 关键：必须用 app_force_csd() 而不是直接 set_decorated(FALSE)。
-     *
-     * KWin 对 GTK 应用会强制服务端装饰（SSD），无视「不要装饰」的请求
-     * （KDE Bug 484800）。给窗口设一个空 titlebar 后，GTK 会走 CSD 路径，
-     * 合成器放手，此时 set_decorated(FALSE) 才真正生效。
-     *
-     * 另外不设 type_hint：Wayland 下 DOCK/UTILITY 这些 X11 概念
-     * 没有直接对应，GTK 会挑一个近似的角色，反而可能让合成器
-     * 加上服务端装饰。保持默认的普通 toplevel 最稳。 */
-    app_force_csd(GTK_WINDOW(g_app.window));
-    gtk_window_set_resizable(GTK_WINDOW(g_app.window), TRUE);
-
-    g_signal_connect(g_app.window, "destroy",
-                     G_CALLBACK(on_window_destroy), NULL);
-    /* map 时再摘一次装饰，兼容会在显示时补边框的窗口管理器 */
-    g_signal_connect(g_app.window, "map-event",
-                     G_CALLBACK(on_window_map), NULL);
-    GdkScreen *screen = gtk_widget_get_screen(g_app.window);
-    GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
-    if (visual && gdk_screen_is_composited(screen))
-        gtk_widget_set_visual(g_app.window, visual);
-    gtk_widget_set_app_paintable(g_app.window, TRUE);
-
-    GtkStyleContext *wctx = gtk_widget_get_style_context(g_app.window);
-    gtk_style_context_add_class(wctx, "osk-window");
-
-    /* 外层容器 + 布局挂载点 */
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_container_add(GTK_CONTAINER(g_app.window), outer);
-
-    /* 白边用 cairo 自绘（CSS 方案会影响弹出菜单，见 app_attach_border）。
-     * 必须在外层容器建好之后调用 —— 它挂到子控件上，
-     * 子控件不存在时会退回到窗口本身，那样在 CSD 模式下画不出来。 */
-    app_attach_border(g_app.window);
-
-    GtkWidget *toolbar = build_toolbar(&g_app);
-    gtk_box_pack_start(GTK_BOX(outer), toolbar, FALSE, FALSE, 0);
-    /* 顶栏与白边错开 1px，和下面的按键区保持一致 */
-    gtk_widget_set_margin_start(toolbar, 1);
-    gtk_widget_set_margin_end(toolbar, 1);
-    gtk_widget_set_margin_top(toolbar, 1);
-
-    g_app.layout_host = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    /* 按键与白边之间留 1px：白边是画在 outer 外沿的描边，
-     * 内容整体内缩 1px 就不会压到线上。 */
-    gtk_widget_set_margin_start(g_app.layout_host, 1);
-    gtk_widget_set_margin_end(g_app.layout_host, 1);
-    gtk_widget_set_margin_top(g_app.layout_host, 0);
-    gtk_widget_set_margin_bottom(g_app.layout_host, 1);
-    gtk_widget_set_hexpand(g_app.layout_host, TRUE);
-    gtk_widget_set_vexpand(g_app.layout_host, TRUE);
-    gtk_box_pack_start(GTK_BOX(outer), g_app.layout_host, TRUE, TRUE, 0);
+    /* 主窗口构建（拆成函数：切出游戏布局时用它整体重建窗口） */
+    create_main_window(&g_app);
 
     /* 游戏布局：从配置载入自定义控件表（没有就用默认布局）。
      * 必须在切到游戏布局之前完成，否则画布构建时拿不到模型。 */
@@ -1177,20 +1525,12 @@ int main(int argc, char **argv) {
         g_app.gp = st;
     }
 
-    /* 加载默认布局 */
-    app_set_layout(&g_app, layout_lookup("standard"));
-    app_apply_config(&g_app);
+    /* 加载默认布局：最简（启动快、窗口小，需要完整键盘再切换） */
+    app_set_layout(&g_app, layout_lookup("minimal"));
 
-    gtk_widget_show_all(g_app.window);
-    /* show_all 之后换页按钮才真正显示，这时再同步一次它的状态 */
-    update_page_button(&g_app);
-    /* 显示后再确认一次无边框（此时 GDK 窗口已创建） */
-    apply_borderless(&g_app);
+    /* 显示主窗口（窗口状态信号已在 create_main_window 里连接） */
+    show_main_window(&g_app);
 
-    g_signal_connect(g_app.window, "size-allocate",
-                  G_CALLBACK(on_window_size_allocate), &g_app);
-    g_signal_connect(g_app.window, "configure-event",
-                  G_CALLBACK(on_window_configure), &g_app);
     gtk_main();
     return 0;
 }

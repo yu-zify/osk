@@ -28,6 +28,7 @@
 #define KEY_SPACING      "key_spacing"
 #define KEY_OPACITY      "opacity"
 #define KEY_PAD_OPACITY  "pad_opacity"
+#define KEY_MOUSE_SPEED  "mouse_speed"
 #define KEY_FONT_SIZE    "font_size"
 #define KEY_CORNER_SIZE  "corner_font_size"
 
@@ -47,6 +48,7 @@ void config_set_defaults(OskConfig *cfg) {
     cfg->key_spacing      = OSK_KEY_SPACING_DEFAULT;
     cfg->opacity          = OSK_OPACITY_DEFAULT;
     cfg->pad_opacity      = OSK_OPACITY_DEFAULT;
+    cfg->mouse_speed      = OSK_MOUSE_SPEED_DEFAULT;
     cfg->font_size        = OSK_FONT_SIZE_DEFAULT;
     cfg->corner_font_size = OSK_CORNER_FONT_SIZE_DEFAULT;
 }
@@ -76,6 +78,11 @@ static void sanitize(OskConfig *cfg) {
         cfg->pad_opacity = OSK_OPACITY_DEFAULT;
     cfg->pad_opacity = CLAMP(cfg->pad_opacity,
                               OSK_OPACITY_MIN, OSK_OPACITY_MAX);
+
+    if (!(cfg->mouse_speed >= OSK_MOUSE_SPEED_MIN))
+        cfg->mouse_speed = OSK_MOUSE_SPEED_DEFAULT;
+    cfg->mouse_speed = CLAMP(cfg->mouse_speed,
+                              OSK_MOUSE_SPEED_MIN, OSK_MOUSE_SPEED_MAX);
 }
 
 /* 读一个整数键；键不存在或不是整数时保留原值（即默认值）。 */
@@ -127,6 +134,7 @@ gboolean config_load(OskConfig *cfg) {
     read_int(kf, KEY_CORNER_SIZE, &cfg->corner_font_size);
     read_double(kf, KEY_OPACITY,  &cfg->opacity);
     read_double(kf, KEY_PAD_OPACITY, &cfg->pad_opacity);
+    read_double(kf, KEY_MOUSE_SPEED, &cfg->mouse_speed);
 
     g_key_file_free(kf);
 
@@ -202,6 +210,8 @@ static void write_appearance(GKeyFile *kf, const OskConfig *cfg) {
     g_key_file_set_double (kf, GROUP_APPEARANCE, KEY_OPACITY,  c.opacity);
     g_key_file_set_double (kf, GROUP_APPEARANCE, KEY_PAD_OPACITY,
                             c.pad_opacity);
+    g_key_file_set_double (kf, GROUP_APPEARANCE, KEY_MOUSE_SPEED,
+                            c.mouse_speed);
     g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_FONT_SIZE, c.font_size);
     g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_CORNER_SIZE,
                            c.corner_font_size);

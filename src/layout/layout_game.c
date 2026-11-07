@@ -77,12 +77,14 @@ void layout_game_release_all(App *app) {
 static void on_key_hold_press(const KeyDef *def, gpointer user_data) {
     App *app = user_data;
     if (!app || !def) return;
+    g_print("[OSK] 键按住 id=%s code=%u\n", def->id ? def->id : "?", def->code);
     held_key_down(app, def->code);
 }
 
 static void on_key_hold_release(const KeyDef *def, gpointer user_data) {
     App *app = user_data;
     if (!app || !def) return;
+    g_print("[OSK] 键松开 id=%s code=%u\n", def->id ? def->id : "?", def->code);
     held_key_up(app, def->code);
 }
 
@@ -98,16 +100,157 @@ static void on_gamepad_hold_release(const KeyDef *def, gpointer user_data) {
     osk_gamepad_button(app->gamepad, def->code, FALSE);
 }
 
+/* —— 鼠标键按住拖拽的每控件状态 ——
+ * 定义在 hold 回调之前：回调里要复位参考点 */
+#define WHEEL_REPEAT_MS 150   /* 滚轮按住连滚的间隔 */
+
+typedef struct {
+    App      *app;
+    OskMouse *mouse;
+    guint     code;
+    gboolean  held;             /* 该键当前是否按住（注入状态） */
+    gdouble   accum_x, accum_y; /* 小数累积，凑整后按整数像素注入 */
+    guint     wheel_repeat_id;  /* 滚轮按住连滚定时器（0 = 未启用） */
+} MouseDragCtx;
+
+static void      wheel_scroll(App *app, guint code);
+static gboolean  on_wheel_repeat_tick(gpointer data);
+
 static void on_mouse_hold_press(const KeyDef *def, gpointer user_data) {
     App *app = user_data;
+    MouseDragCtx *ctx;
+
     if (!app || !def || !app->mouse) return;
+
+    g_print("[OSK] 鼠标键按下 code=%u\n", def->code);
+
+    ctx = g_dataset_get_data((gpointer)def, "osk-mousedrag");
+
+    /* 滚轮：没有「按住」状态 —— 按下立即滚一格，随后按住连滚 */
+    if (ctx && (def->code == BTN_GEAR_UP || def->code == BTN_GEAR_DOWN)) {
+        ctx->held = TRUE;
+        wheel_scroll(app, def->code);
+        if (ctx->wheel_repeat_id)
+            g_source_remove(ctx->wheel_repeat_id);
+        ctx->wheel_repeat_id = g_timeout_add(WHEEL_REPEAT_MS,
+                                              on_wheel_repeat_tick, ctx);
+        return;
+    }
+
+    if (ctx)
+        ctx->held = TRUE;   /* 拖拽期间才注入指针移动 */
+
     osk_mouse_button(app->mouse, def->code, TRUE);
 }
 
 static void on_mouse_hold_release(const KeyDef *def, gpointer user_data) {
     App *app = user_data;
+    MouseDragCtx *ctx;
+
     if (!app || !def || !app->mouse) return;
+
+    g_print("[OSK] 鼠标键松开 code=%u\n", def->code);
+
+    ctx = g_dataset_get_data((gpointer)def, "osk-mousedrag");
+    if (ctx) {
+        ctx->held = FALSE;
+        if (ctx->wheel_repeat_id) {
+            g_source_remove(ctx->wheel_repeat_id);
+            ctx->wheel_repeat_id = 0;
+        }
+    }
+
+    /* 滚轮没有按下状态，松手只需停掉连滚 */
+    if (def->code == BTN_GEAR_UP || def->code == BTN_GEAR_DOWN) return;
+
     osk_mouse_button(app->mouse, def->code, FALSE);
+}
+
+/* ===== 鼠标键按住拖拽 =====
+ *
+ * 游戏布局的鼠标键按下未松手时，移动手指 = 指针移动
+ * （按键保持按下）—— 等价于真实的「按下拖拽」。
+ *
+ * 实现：KeyButton 的手势在按住期间持续上报手指位移
+ * （key_button_set_hold_drag），这里把位移换算成相对移动注入。
+ * 走手势而不是 motion-notify-event 的原因：多点触控时模拟指针
+ * 只有一根，摇杆先按住的话，第二个按住的鼠标键收不到模拟
+ * motion 事件 —— 手势按序列跟踪，没有这个问题。
+ *
+ * 速度与触控板一致（设置里的鼠标速度）。
+ *
+ * ctx 挂在虚拟 KeyDef 上（g_dataset）：hold 回调拿不到控件指针，
+ * 只能靠 def 反查 —— def 本身就是每个鼠标键控件私有的，
+ * 随控件销毁时一并释放（见 virtual_def_free）。 */
+
+/* dy 正值向下滚（uinput_mouse.h 的约定） */
+static void wheel_scroll(App *app, guint code) {
+    gdouble dy = (code == BTN_GEAR_DOWN) ? 1 : -1;
+    g_print("[OSK] 滚轮注入 dy=%g\n", dy);
+    osk_mouse_scroll(app->mouse, 0, dy);
+}
+
+static gboolean on_wheel_repeat_tick(gpointer data) {
+    MouseDragCtx *ctx = data;
+
+    if (!ctx || !ctx->held || !ctx->app || !ctx->app->mouse) {
+        if (ctx) ctx->wheel_repeat_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    wheel_scroll(ctx->app, ctx->code);
+    return G_SOURCE_CONTINUE;
+}
+
+/* 与触控板 move_speed 相同的速度来源 */
+static gdouble mouse_drag_speed(const App *app) {
+    gdouble s = app ? app->config.mouse_speed : OSK_MOUSE_SPEED_DEFAULT;
+    if (s < OSK_MOUSE_SPEED_MIN || s > OSK_MOUSE_SPEED_MAX)
+        return OSK_MOUSE_SPEED_DEFAULT;
+    return s;
+}
+
+static void on_mouse_hold_drag(const KeyDef *def, gdouble dx, gdouble dy,
+                               gpointer user_data) {
+    App *app = user_data;
+    MouseDragCtx *ctx;
+    gdouble speed;
+    gint ix, iy;
+
+    if (!app || !def || !app->mouse) return;
+
+    /* 滚轮控件不拖拽 */
+    if (def->code == BTN_GEAR_UP || def->code == BTN_GEAR_DOWN) return;
+
+    ctx = g_dataset_get_data((gpointer)def, "osk-mousedrag");
+    if (!ctx || !ctx->held) return;
+
+    speed = mouse_drag_speed(app);
+    ctx->accum_x += dx * speed;
+    ctx->accum_y += dy * speed;
+
+    ix = (gint)ctx->accum_x;
+    iy = (gint)ctx->accum_y;
+    if (ix == 0 && iy == 0) return;
+
+    ctx->accum_x -= ix;
+    ctx->accum_y -= iy;
+
+    osk_mouse_move_rel(app->mouse, ix, iy);
+
+    /* 同触控板：维护光标位置跟踪（点击穿透挖洞的数据来源） */
+    layout_note_cursor_move(app, ix, iy);
+}
+
+static void mouse_drag_ctx_free(gpointer p) {
+    MouseDragCtx *ctx = p;
+    if (!ctx) return;
+    /* 控件销毁时连滚定时器必须摘掉，否则悬空回调 */
+    if (ctx->wheel_repeat_id) {
+        g_source_remove(ctx->wheel_repeat_id);
+        ctx->wheel_repeat_id = 0;
+    }
+    g_free(ctx);
 }
 
 /* ===== 虚拟 KeyDef（手柄/鼠标键用） ===== */
@@ -118,6 +261,8 @@ static void on_mouse_hold_release(const KeyDef *def, gpointer user_data) {
 static void virtual_def_free(gpointer p) {
     KeyDef *d = p;
     if (!d) return;
+    /* 鼠标键拖拽的 ctx 挂在 def 的 dataset 上，先销毁 */
+    g_dataset_destroy(d);
     g_free((gpointer)d->label);
     g_free(d);
 }
@@ -188,22 +333,182 @@ static GtkWidget *make_gamepad_widget(App *app, GpItem *item) {
 
 static GtkWidget *make_mouse_widget(App *app, GpItem *item) {
     const char *label = "LMB";
-    if (item->code == BTN_RIGHT)  label = "RMB";
-    if (item->code == BTN_MIDDLE) label = "MMB";
+    KeyDef *def;
+    KeyButton *kb;
+    GtkWidget *w;
+    MouseDragCtx *ctx;
 
-    KeyDef *def = make_virtual_def(label, item->code,
-                                    KEY_ACTION_MOUSE_BTN);
+    if (item->code == BTN_RIGHT)      label = "RMB";
+    if (item->code == BTN_MIDDLE)     label = "MMB";
+    if (item->code == BTN_GEAR_UP)    label = "W↑";
+    if (item->code == BTN_GEAR_DOWN)  label = "W↓";
 
-    KeyButton *kb = key_button_new(def, NULL, NULL, app);
+    def = make_virtual_def(label, item->code, KEY_ACTION_MOUSE_BTN);
+
+    kb = key_button_new(def, NULL, NULL, app);
     key_button_set_fixed_size(kb, item->w, item->h);
     key_button_set_hold_mode(kb, on_mouse_hold_press,
                               on_mouse_hold_release);
+    /* 按住拖拽：按下未松手时移动手指 = 指针移动（滚轮键不需要） */
+    key_button_set_hold_drag(kb, on_mouse_hold_drag);
     apply_transparent_key_style(kb);
     gtk_widget_set_opacity(key_button_widget(kb), item_alpha(item));
 
     g_object_set_data_full(G_OBJECT(key_button_widget(kb)),
                            "osk-vdef", def, virtual_def_free);
-    return key_button_widget(kb);
+
+    w = key_button_widget(kb);
+    ctx = g_new0(MouseDragCtx, 1);
+    ctx->app   = app;
+    ctx->mouse = app->mouse;
+    ctx->code  = item->code;
+
+    /* ctx 生命周期跟着 def 走：控件销毁 → virtual_def_free →
+     * g_dataset_destroy → 这里的 free 函数 */
+    g_dataset_set_data_full((gpointer)def, "osk-mousedrag",
+                            ctx, mouse_drag_ctx_free);
+
+    return w;
+}
+
+/* ===== 滚轮条 =====
+ *
+ * 竖条形区域：手指沿条上下滑动 = 鼠标滚轮滚动。
+ * 比点按式滚轮好用：滑动是连续量，一格一格看得见，
+ * 而且不用先精确对准指针位置。
+ *
+ * 方向约定与触控板一致：手指向下滑 = 滚轮向下滚。
+ * 手势按触点序列跟踪，多点触控下不受其他手指影响。 */
+typedef struct {
+    App      *app;
+    OskMouse *mouse;
+    gdouble   last_y;    /* 上一帧手指位置 */
+    gboolean  has_last;
+    gdouble   accum;     /* 未凑整的滚动格数（1.0 = 一格） */
+    guint     hole_restore_id; /* 洞口恢复定时器 */
+} WheelStrip;
+
+#define WHEEL_TICK_PX     32.0   /* 手指滑 32px ≈ 滚一格 */
+#define WHEEL_HOLE_MS     80     /* 注入后保持洞口的时长，同触控板点击 */
+
+static void wheel_strip_free(gpointer p) {
+    WheelStrip *ws = p;
+    if (!ws) return;
+    if (ws->hole_restore_id) {
+        g_source_remove(ws->hole_restore_id);
+        ws->hole_restore_id = 0;
+    }
+    g_free(ws);
+}
+
+/* 注入滚轮前必须先在光标处挖洞！
+ *
+ * 滚轮事件和点击一样走指针命中测试：OSK 是全屏置顶窗口，
+ * 指针悬在它上面时，注入的滚轮会被 OSK 自己吃掉
+ * （画布上没有可滚动的内容，表现成「滚了但什么都没发生」）。
+ * 触控板的点击穿透就是同样的机制（layout_punch_hole）：
+ * 挖洞 → 注入 → 80ms 后恢复。 */
+static gboolean wheel_restore_tick(gpointer data) {
+    WheelStrip *ws = data;
+    ws->hole_restore_id = 0;
+    if (ws->app)
+        layout_restore_hole(ws->app);
+    return G_SOURCE_REMOVE;
+}
+
+static void wheel_inject(WheelStrip *ws, gint n) {
+    if (ws->app)
+        layout_punch_hole(ws->app);
+
+    osk_mouse_scroll(ws->mouse, 0, n);
+
+    if (ws->hole_restore_id)
+        g_source_remove(ws->hole_restore_id);
+    ws->hole_restore_id = g_timeout_add(WHEEL_HOLE_MS,
+                                         wheel_restore_tick, ws);
+}
+
+static void on_wheel_drag_end(GtkGesture *g, GdkEventSequence *seq,
+                              gpointer data) {
+    (void)g; (void)seq;
+    WheelStrip *ws = data;
+    ws->has_last = FALSE;
+    ws->accum = 0;
+}
+
+static void on_wheel_drag_update(GtkGestureDrag *g, gdouble ox, gdouble oy,
+                                 gpointer data) {
+    (void)g;
+    WheelStrip *ws = data;
+    gdouble dy;
+    gint n;
+
+    (void)ox;
+    if (!ws->app || !ws->mouse) return;
+
+    dy = ws->has_last ? (oy - ws->last_y) : 0;
+    ws->last_y = oy;
+    ws->has_last = TRUE;
+    if (dy == 0) return;
+
+    ws->accum += dy / WHEEL_TICK_PX;
+
+    n = (gint)ws->accum;
+    if (n == 0) return;
+    ws->accum -= n;
+
+    g_print("[OSK] 滚轮条注入 dy=%d\n", n);
+    wheel_inject(ws, n);
+}
+
+static GtkWidget *make_wheel_widget(App *app, GpItem *item) {
+    GtkWidget *area;
+    GtkWidget *box;
+    GtkWidget *lbl_up;
+    GtkWidget *lbl_dn;
+    GtkGesture *drag;
+    WheelStrip *ws;
+
+    area = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(area), TRUE);
+    gtk_widget_set_can_focus(area, FALSE);
+    gtk_style_context_add_class(gtk_widget_get_style_context(area),
+                                 "osk-wheel-strip");
+
+    /* 竖条外观：上下两个方向箭头 */
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(area), box);
+
+    lbl_up = gtk_label_new("▲");
+    lbl_dn = gtk_label_new("▼");
+    gtk_style_context_add_class(gtk_widget_get_style_context(lbl_up),
+                                 "osk-dim");
+    gtk_style_context_add_class(gtk_widget_get_style_context(lbl_dn),
+                                 "osk-dim");
+    gtk_box_pack_start(GTK_BOX(box), lbl_up, TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(box), lbl_dn, TRUE, TRUE, 0);
+
+    ws = g_new0(WheelStrip, 1);
+    ws->app   = app;
+    ws->mouse = app->mouse;
+
+    drag = gtk_gesture_drag_new(area);
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag),
+                                   GDK_BUTTON_PRIMARY);
+    g_signal_connect(drag, "begin",       G_CALLBACK(on_wheel_drag_end), ws);
+    g_signal_connect(drag, "drag-update", G_CALLBACK(on_wheel_drag_update), ws);
+    g_signal_connect(drag, "end",         G_CALLBACK(on_wheel_drag_end), ws);
+    g_signal_connect(drag, "cancel",      G_CALLBACK(on_wheel_drag_end), ws);
+    g_object_set_data_full(G_OBJECT(area), "osk-wheeldrag",
+                            drag, g_object_unref);
+    g_object_set_data_full(G_OBJECT(area), "osk-wheelstrip",
+                            ws, wheel_strip_free);
+
+    /* 透明布局下必须进输入区，否则点上去会直接穿透到桌面 */
+    g_object_set_data(G_OBJECT(area), "osk-input", GINT_TO_POINTER(1));
+
+    gtk_widget_set_opacity(area, item_alpha(item));
+    return area;
 }
 
 /* ===== 编辑模式：透明捕获层 =====
@@ -462,6 +767,7 @@ static void on_pick_key_id(GtkMenuItem *mi, gpointer data) {
         g_free(item->id);
         item->id = NULL;
 
+        g_print("[OSK] 映射→鼠标键 code=%d\n", item->code);
         gamepad_save();
         if (app) app_rebuild_layout(app);
         return;
@@ -477,6 +783,7 @@ static void on_pick_key_id(GtkMenuItem *mi, gpointer data) {
     g_free(item->id);
     item->id = g_strdup(id);
 
+    g_print("[OSK] 映射→键盘键 id=%s\n", item->id);
     gamepad_save();
     if (app) app_rebuild_layout(app);   /* 让新映射立刻可见 */
 }
@@ -535,6 +842,8 @@ static void on_create_item(GtkMenuItem *mi, gpointer data) {
         it->w = 140; it->h = 140;
     } else if (it->type == GP_ITEM_TOUCHPAD) {
         it->w = 220; it->h = 140;
+    } else if (it->type == GP_ITEM_WHEEL) {
+        it->w = 56; it->h = 180;
     }
     gp_layout_clamp_item(app->gp->model, it);
 
@@ -831,6 +1140,7 @@ static void show_item_menu(EditCtx *ctx, GpItem *item, GdkEventButton *ev) {
             { "左摇杆",   GP_ITEM_STICK_L  },
             { "右摇杆",   GP_ITEM_STICK_R  },
             { "触控板",   GP_ITEM_TOUCHPAD },
+            { "滚轮条",   GP_ITEM_WHEEL    },
         };
 
         for (gsize i = 0; i < G_N_ELEMENTS(adds); ++i) {
@@ -864,8 +1174,11 @@ static void show_item_menu(EditCtx *ctx, GpItem *item, GdkEventButton *ev) {
         gsize n = 0;
         const KeyDef *all = keylib_all(&n);
         for (gsize i = 0; i < n; ++i) {
-            /* 只列能真正发按键的项，跳过 page 这种控件键 */
-            if (all[i].action != KEY_ACTION_EMIT) continue;
+            /* 只列能真正发按键的项，跳过 page 这种控件键。
+             * 修饰键（Ctrl/Alt/Shift...）也算：游戏布局是按住语义，
+             * 修饰键在这里就是普通的按住发键，和物理键盘一样用。 */
+            if (all[i].action != KEY_ACTION_EMIT &&
+                all[i].action != KEY_ACTION_MODIFIER) continue;
 
             GtkWidget *mi = gtk_menu_item_new_with_label(all[i].label);
             g_object_set_data(G_OBJECT(mi), "gp-item", item);
@@ -878,7 +1191,9 @@ static void show_item_menu(EditCtx *ctx, GpItem *item, GdkEventButton *ev) {
         }
 
         /* 鼠标左右键：游戏里常用按键代替鼠标，
-         * 把它们放进同一个映射菜单，选中后控件会变成鼠标键。 */
+         * 把它们放进同一个映射菜单，选中后控件会变成鼠标键。
+         * （点按式滚轮已移除：滚动是连续量，点按一次只滚一格
+         *   不好用，改用独立的「滚轮条」控件。） */
         gtk_menu_shell_append(GTK_MENU_SHELL(submenu),
                               gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
@@ -1086,6 +1401,8 @@ static GtkWidget *make_item_widget(App *app, GpItem *item) {
         gtk_widget_set_opacity(area, item_alpha(item));
         return area;
     }
+    case GP_ITEM_WHEEL:
+        return make_wheel_widget(app, item);
     }
     return NULL;
 }

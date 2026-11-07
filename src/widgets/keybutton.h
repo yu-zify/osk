@@ -16,6 +16,18 @@ typedef void (*KeyButtonSwipeFunc)(const KeyDef *def, gpointer user_data);
  * 两者一定成对出现（取消手势时也会补一次 release）。 */
 typedef void (*KeyButtonHoldFunc)(const KeyDef *def, gpointer user_data);
 
+/* HOLD 模式下按住并拖动：手指每移动一帧回调一次，
+ * dx/dy 是相对上一帧的位移（像素）。
+ *
+ * 为什么不用 motion-notify-event：多点触控时「模拟指针」只有一根
+ * （第一个落下的手指），第二根手指的移动只走 touch/gesture 路径，
+ * 模拟的 motion 事件不会发给第二个按住的控件 —— 表现为
+ * 「摇杆先按住时，鼠标键能按住却拖不动」。手势是按序列跟踪的，
+ * 每个控件拿到的是自己那根手指的移动，天然没有这个问题。 */
+typedef void (*KeyButtonHoldDragFunc)(const KeyDef *def,
+                                       gdouble dx, gdouble dy,
+                                       gpointer user_data);
+
 KeyButton *key_button_new(const KeyDef *def,
                            KeyButtonActivateFunc on_activate,
                            KeyButtonSwipeFunc on_swipe,
@@ -32,6 +44,11 @@ KeyButton *key_button_new(const KeyDef *def,
 void key_button_set_hold_mode(KeyButton *kb,
                                KeyButtonHoldFunc on_press,
                                KeyButtonHoldFunc on_release);
+
+/* HOLD 模式下的按住拖拽回调（配合 on_press/on_release 使用）。
+ * 只对用得着的控件设置（比如游戏布局的鼠标键）；不设置则拖动被忽略。 */
+void key_button_set_hold_drag(KeyButton *kb,
+                               KeyButtonHoldDragFunc on_drag);
 
 GtkWidget    *key_button_widget(KeyButton *kb);
 

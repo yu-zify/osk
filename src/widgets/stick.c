@@ -7,6 +7,12 @@
 /* 死区：像素比例。小于这个偏移视为居中，避免手指抖动导致视角漂移 */
 #define DEAD_ZONE_RATIO   0.08
 
+/* 八向扇区的边界滞回（角度）。
+ *
+ * 手指停在两个扇区分界线附近时，角度会有微小抖动，导致相邻方向
+ * 反复按下/松开 —— 听起来像连点。留 5° 的容差可以稳住。 */
+#define SECTOR_HYSTERESIS_DEG 5.0
+
 struct _StickWidget {
     GtkWidget  *area;
     OskGamepad *gp;
@@ -28,6 +34,10 @@ struct _StickWidget {
     /* 八向模式：开启后斜向会同时触发两个方向的键（比如右上同时按 W+D）。
      * 关闭时只取主轴，斜推只触发一个方向。 */
     gboolean eight_way;
+
+    /* 上一次落在哪个扇区（0..7），用于边界滞回。
+     * -1 表示还没有方向。 */
+    gint last_sector;
 
     /* 四方向键位绑定：0 表示该方向不绑 */
     unsigned short dir_code[STICK_DIR_COUNT];
@@ -55,16 +65,29 @@ static gdouble base_radius(StickWidget *sw) {
     return r > 0 ? r : 0;
 }
 
-/* 把归一化坐标 (-1..1) 换算成四方向的按下状态并发按键。
+/* 把归一化坐标 (-1..1) 换算成方向的按下状态并发按键。
  *
- * 两种模式：
- *   四向（默认）：只取主轴。斜推 45° 时取分量大的那个轴，
- *                 所以右上只会触发 W 或 D 中的一个。
- *   八向（eight_way）：每个轴独立判定。斜推会同时触发两个方向，
- *                 右上同时按 W 和 D —— 适合需要斜向移动的游戏。
+ * ===== 两种模式的判定方式 =====
  *
- * 八向判定额外要求该轴分量超过一个较小的阈值，
- * 否则接近水平的推动会误触发上下键。 */
+ * 四向（默认）：只取主轴。斜推 45° 时取分量大的那个轴，
+ *               所以右上只会触发 W 或 D 中的一个。
+ *               这等价于把圆周切成 4 个 90° 扇区，是均匀的。
+ *
+ * 八向（eight_way）：把圆周切成 8 个 45° 扇区，推到哪个就是哪个。
+ *               右上（45°）会同时按 W 和 D。
+ *
+ * ===== 为什么不能按轴独立判断阈值 =====
+ *
+ * 早先的八向实现是「每个轴各自超过阈值就触发该轴方向」：
+ *
+ *     if (|ny| >= 0.08) 触发 上/下
+ *     if (|nx| >= 0.08) 触发 左/右
+ *
+ * 结果是扇区大小极不均匀：只有 |ny| < 0.08 时才算「纯右」，
+ * 换算成角度只有约 ±4.6°（合计 9°），而剩下 80 多度全被算成斜向。
+ * 用户感受到的就是「几乎推不出正方向，方向不均匀」。
+ *
+ * 按角度切扇区后，8 个方向各占 45°，才是真正均匀的。 */
 static void update_dir_keys(StickWidget *sw, gdouble nx, gdouble ny) {
     if (!sw->kbd) return;
 
@@ -73,25 +96,69 @@ static void update_dir_keys(StickWidget *sw, gdouble nx, gdouble ny) {
     /* 用与轴相同的死区作为触发阈值，保证「轴动了键才动」 */
     const gdouble th = DEAD_ZONE_RATIO;
 
-    gdouble ax = fabs(nx);
-    gdouble ay = fabs(ny);
+    /* 先看离中心够不够远。用欧氏距离而不是每个轴单独的阈值，
+     * 这样八个方向的「起始距离」一致，不会出现斜向更容易触发的情况。 */
+    gdouble dist = sqrt(nx * nx + ny * ny);
 
-    if (sw->eight_way) {
-        /* 八向：每个轴独立判定，但要求该轴明显强于另一轴的一半，
-         * 避免轻微抖动就触发两个方向。 */
-        if (ay >= th)
-            want[ny < 0 ? STICK_DIR_UP : STICK_DIR_DOWN] = TRUE;
-        if (ax >= th)
-            want[nx < 0 ? STICK_DIR_LEFT : STICK_DIR_RIGHT] = TRUE;
-    } else {
-        /* 四向：只取主轴，斜推只触发一个方向 */
-        if (ay >= th && ay >= ax) {
-            if (ny < 0) want[STICK_DIR_UP]   = TRUE;
-            else        want[STICK_DIR_DOWN] = TRUE;
-        } else if (ax >= th && ax > ay) {
-            if (nx < 0) want[STICK_DIR_LEFT]  = TRUE;
-            else        want[STICK_DIR_RIGHT] = TRUE;
+    if (dist >= th) {
+        if (sw->eight_way) {
+            /* ---- 八向：45° 扇区 ----
+             *
+             * 屏幕坐标 y 向下为正，所以 atan2(ny, nx) 得到的角度是：
+             *   0° = 右   90° = 下   180° = 左   -90° = 上
+             *
+             * 换算到 0..360 后，每 45° 一个扇区，扇区中心对准
+             * 正方向（0°/45°/90°...）。 */
+            gdouble ang = atan2(ny, nx) * 180.0 / G_PI;
+            if (ang < 0) ang += 360.0;
+
+            gint sector = ((gint)floor((ang + 22.5) / 45.0)) % 8;
+
+            /* 边界滞回：手指停在两个扇区的分界线附近时，
+             * 角度微小抖动会让方向键反复按下/松开，听起来像连点。
+             * 如果新扇区和上一个扇区相邻且在容差内，保持原方向。 */
+            if (sw->last_sector >= 0 && sector != sw->last_sector) {
+                gdouble last_center = sw->last_sector * 45.0;
+                gdouble diff = fabs(ang - last_center);
+                if (diff > 180.0) diff = 360.0 - diff;
+
+                if (diff <= 22.5 + SECTOR_HYSTERESIS_DEG)
+                    sector = sw->last_sector;
+            }
+            sw->last_sector = sector;
+
+            /* 扇区 → 方向。偶数扇区是正方向，奇数扇区是斜向。 */
+            switch (sector) {
+            case 0: want[STICK_DIR_RIGHT] = TRUE; break;
+            case 1: want[STICK_DIR_DOWN]  = TRUE;
+                    want[STICK_DIR_RIGHT] = TRUE; break;
+            case 2: want[STICK_DIR_DOWN]  = TRUE; break;
+            case 3: want[STICK_DIR_DOWN]  = TRUE;
+                    want[STICK_DIR_LEFT]  = TRUE; break;
+            case 4: want[STICK_DIR_LEFT]  = TRUE; break;
+            case 5: want[STICK_DIR_UP]    = TRUE;
+                    want[STICK_DIR_LEFT]  = TRUE; break;
+            case 6: want[STICK_DIR_UP]    = TRUE; break;
+            case 7: want[STICK_DIR_UP]    = TRUE;
+                    want[STICK_DIR_RIGHT] = TRUE; break;
+            }
+        } else {
+            /* ---- 四向：90° 扇区，只取主轴 ---- */
+            gdouble ax = fabs(nx);
+            gdouble ay = fabs(ny);
+
+            if (ay >= ax) {
+                if (ny < 0) want[STICK_DIR_UP]   = TRUE;
+                else        want[STICK_DIR_DOWN] = TRUE;
+            } else {
+                if (nx < 0) want[STICK_DIR_LEFT]  = TRUE;
+                else        want[STICK_DIR_RIGHT] = TRUE;
+            }
         }
+    } else {
+        /* 回到死区内：没有方向，同时复位扇区记录，
+         * 避免下次推动时还带着上一次的滞回状态。 */
+        sw->last_sector = -1;
     }
 
     for (int d = 0; d < STICK_DIR_COUNT; ++d) {
@@ -398,6 +465,11 @@ StickWidget *stick_widget_new(OskGamepad *gp, gboolean right_side,
     sw->kbd = kbd;
     sw->right_side = right_side;
     sw->bg_alpha = 0.55;          /* 与绘制里的默认值保持一致 */
+
+    /* -1 表示「还没有方向」。
+     * 不能依赖 g_new0 的 0 —— 0 是一个有效扇区（RIGHT），
+     * 会让首次推动时误用滞回逻辑。 */
+    sw->last_sector = -1;
 
     sw->area = gtk_drawing_area_new();
     gtk_widget_set_hexpand(sw->area, TRUE);
