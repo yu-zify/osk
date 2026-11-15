@@ -20,25 +20,19 @@ static const char *const p1_row_special[] = {
 
 /* ===== 第二页：功能键 + 控制键 + 符号键 ===== */
 static const char *const p2_row_f1[] = {
-    "f1","f2","f3","f4","f5","f6", NULL
+    "f1","f2","f3","f4","f5","f6","1","2","3","backspace", NULL
 };
 static const char *const p2_row_f2[] = {
-    "f7","f8","f9","f10","f11","f12", NULL
+    "f7","f8","f9","f10","f11","f12","4","5","6","enter", NULL
 };
 static const char *const p2_row_1[] = {
-    "esc","tab","backspace","enter", NULL
+    "tab","`","-","=","[","]","7","8","9","home", NULL
 };
 static const char *const p2_row_2[] = {
-    "home","end","up","down","left","right", NULL
+    "shift","\\",";","'",",",".","/","0","up","end", NULL
 };
 static const char *const p2_row_3[] = {
-    "1","2","3","4","5","6","7","8","9","0", NULL
-};
-static const char *const p2_row_4[] = {
-    "`","-","=","[","]","\\",";","'",",",".","/", NULL
-};
-static const char *const p2_row_5[] = {
-    "shift","caps","ctrl","alt","meta","space*3", NULL
+    "esc","ctrl","alt","win","space*3","left","down","right", NULL
 };
 
 static GtkWidget *standard_create(App *app) {
@@ -48,7 +42,7 @@ static GtkWidget *standard_create(App *app) {
     };
     static const char *const *const page2[] = {
         p2_row_f1, p2_row_f2, p2_row_1, p2_row_2,
-        p2_row_3, p2_row_4, p2_row_5
+        p2_row_3
     };
 
     const char *const *const *rows =
