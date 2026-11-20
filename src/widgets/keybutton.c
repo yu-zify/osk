@@ -9,6 +9,7 @@ struct _KeyButton {
     GtkWidget            *label_main;   /* 中间：主字符（随 shift/caps 变化） */
     GtkWidget            *label_up;     /* 右上：普通状态上滑字符 */
     GtkWidget            *label_up_s;   /* 右上：Shift 状态上滑字符 */
+    GtkWidget            *label_hint;   /* 左上：符号键的 Shift 形态（! @ #） */
 
     const KeyDef         *def;
     KeyButtonActivateFunc on_activate;
@@ -349,7 +350,8 @@ KeyButton *key_button_new(const KeyDef *def,
                                "osk-label-up-shift");
     gtk_box_pack_start(GTK_BOX(corner), kb->label_up_s, FALSE, FALSE, 0);
 
-    /* 左上角：符号键的 Shift 形态（! @ # 之类） */
+    /* 左上角：符号键的 Shift 形态（! @ # 之类）。
+     * 指针存下来，供 key_button_set_hint_highlight 在 Shift 激活时加亮。 */
     if (def->klass == KEY_CLASS_CHAR && !def->is_letter &&
         def->label_shift && *def->label_shift) {
         GtkWidget *hint = make_overlay_label(GTK_OVERLAY(overlay),
@@ -357,6 +359,7 @@ KeyButton *key_button_new(const KeyDef *def,
                                              4, 0, 1,
                                              "osk-label-hint");
         gtk_label_set_text(GTK_LABEL(hint), def->label_shift);
+        kb->label_hint = hint;
     }
 
     /* ---- 3. 挂手势 ---- */
@@ -443,6 +446,18 @@ void key_button_set_up_labels(KeyButton *kb,
         gtk_style_context_add_class(c2, "up-current");
     else if (up && *up)
         gtk_style_context_add_class(c1, "up-current");
+}
+
+/* 左上角 Shift 形态的加亮。
+ * 字母键没有这个角标（label_hint 为 NULL），调用会被忽略。 */
+void key_button_set_hint_highlight(KeyButton *kb, gboolean highlight) {
+    if (!kb || !kb->label_hint) return;
+
+    GtkStyleContext *ctx = gtk_widget_get_style_context(kb->label_hint);
+    if (highlight)
+        gtk_style_context_add_class(ctx, "hint-current");
+    else
+        gtk_style_context_remove_class(ctx, "hint-current");
 }
 
 void key_button_set_fixed_size(KeyButton *kb, gint width, gint height) {

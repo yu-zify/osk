@@ -128,6 +128,12 @@ static void update_char_button(App *app, KeyButton *kb) {
     if (!def || def->klass != KEY_CLASS_CHAR) return;
     gboolean upper = want_upper(app);
 
+    /* 符号键（1 ; , 之类）左上角印着 Shift 形态。Shift 激活时把它加亮，
+     * 让用户一眼看出现在按下去出的是上档符号。Caps 不参与 ——
+     * 数字/符号的上档只受 Shift 影响（见 need_shift_mod）。
+     * 字母键没有这个角标，加亮调用会被控件忽略。 */
+    key_button_set_hint_highlight(kb, shift_active(app));
+
     if (def->is_letter && def->label_shift) {
         key_button_set_label(kb, upper ? def->label_shift : def->label);
         key_button_set_active_class(kb, "key-upper", upper);
@@ -225,6 +231,40 @@ static gboolean on_border_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     cairo_restore(cr);
 
     /* 返回 FALSE：让 GTK 继续自己的绘制流程，不接管 */
+    return FALSE;
+}
+
+/* 子窗口外壳的白边：在 GTK 画完底色与子控件之后描一圈。
+ *
+ * 为什么用 connect_after + 不设 app_paintable：
+ *   外壳的深色底由 CSS 提供（.osk-subwin-shell）。一旦设
+ *   app_paintable，GTK 就不再画那层 CSS 背景，窗口变全透明，
+ *   只剩一条 alpha 0.55 的细线 —— 看起来就是「没有白边」。
+ *
+ *   而如果在 draw 里返回 TRUE 自己接管，GtkContainer 的默认
+ *   绘制处理器会被跳过（它负责递归绘制子控件），标题栏和
+ *   内容区会整块消失。
+ *
+ *   所以两条都不走：让 GTK 照常画背景和子控件，我们在
+ *   connect_after 阶段最后描边。线画在最上层，边界清晰，
+ *   也不会影响任何内容。 */
+static gboolean on_subwin_shell_draw_after(GtkWidget *w, cairo_t *cr,
+                                            gpointer data) {
+    (void)data;
+
+    GtkAllocation a;
+    gtk_widget_get_allocation(w, &a);
+    if (a.width <= 0 || a.height <= 0) return FALSE;
+
+    cairo_save(cr);
+
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.55);
+    cairo_set_line_width(cr, 1.0);
+    rounded_rect(cr, 0.5, 0.5, a.width - 1.0, a.height - 1.0, BORDER_RADIUS);
+    cairo_stroke(cr);
+
+    cairo_restore(cr);
+
     return FALSE;
 }
 
@@ -359,6 +399,17 @@ GtkWidget *app_subwindow_shell(GtkWidget *win, const char *title) {
                                  "osk-subwin-content");
     gtk_box_pack_start(GTK_BOX(shell), content, TRUE, TRUE, 0);
 
+    /* 白边：在 GTK 画完底色和子控件之后描一圈。
+     *
+     * 注意这里不设 app_paintable、也不接管 draw：
+     *   - 设 app_paintable 会让 GTK 不再画 .osk-subwin-shell 的深色底，
+     *     窗口变全透明，白边几乎看不见（之前的 bug）；
+     *   - 在 draw 里返回 TRUE 会跳过 GtkContainer 递归绘制子控件，
+     *     标题栏和内容区整块消失（也是之前的 bug）。
+     * connect_after 让线画在最后、压在最上层，内容不受影响。 */
+    g_signal_connect_after(shell, "draw",
+                            G_CALLBACK(on_subwin_shell_draw_after), NULL);
+
     return content;
 }
 
@@ -371,13 +422,29 @@ void app_setup_subwindow(GtkWidget *win) {
 
     gtk_style_context_add_class(gtk_widget_get_style_context(win),
                                  "osk-subwindow");
+
+    /* RGBA visual + app_paintable，和主窗口一致。
+     *
+     * 没有这两个，窗口的「圆角外侧」区域会是不透明黑底 ——
+     * 外壳的 border-radius 等于白设，四个角依然是直角方块；
+     * 白边（cairo 半透明描边）也会因为压在黑底上而显脏。
+     * 有了它们，角外的像素真正透明，能透出桌面。 */
+    GdkScreen *screen = gtk_widget_get_screen(win);
+    GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
+    if (visual && gdk_screen_is_composited(screen))
+        gtk_widget_set_visual(win, visual);
+    gtk_widget_set_app_paintable(win, TRUE);
 }
 
-/* 白边挂在窗口最外层子控件（shell）的外沿 —— 必须是
- * app_subwindow_shell 建好的那个 box，这样边框在内容之外，
- * 不会像之前那样陷进内容里变成一圈内框。 */
+/* 子窗口收尾。
+ *
+ * 白边和底色已在 app_subwindow_shell 里处理完
+ * （CSS 底色 + connect_after 描边）。
+ * 这里不能再调 app_attach_border —— 那会把控件设成 app_paintable，
+ * 导致 CSS 底色不再绘制、窗口变全透明。
+ * 保留这个函数是为了让调用方的「建壳 → 填内容 → 收尾」流程完整。 */
 void app_finish_subwindow(GtkWidget *win) {
-    app_attach_border(win);
+    (void)win;
 }
 
 void app_on_key_activate(const KeyDef *def, gboolean is_repeat,

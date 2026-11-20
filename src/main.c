@@ -8,6 +8,7 @@
 
 #include "app.h"
 #include "settings.h"
+#include "first_run.h"
 #include "layout/layout.h"
 #include "layout/gamepad_layout.h"
 #include "layout/gamepad_editor.h"
@@ -308,6 +309,36 @@ void app_rebuild_layout(App *app) {
     schedule_fit(app);
 }
 
+/* 让顶栏里随布局变化的按钮与当前布局一致。
+ *
+ * 必须在两处调用：
+ *   1. app_set_layout —— 用户切布局时；
+ *   2. show_main_window —— 重建窗口后（顶栏是新建的，
+ *      所有按钮默认可见，得按当前布局重新同步一遍）。
+ * 第 2 点是「从游戏布局切回普通布局后编辑按钮还留着」的修复。 */
+static void app_sync_toolbar_visibility(App *app) {
+    if (!app) return;
+
+    gboolean game_mode = (app->layout == layout_game_ops());
+
+    /* 拖动区：铺满布局（游戏）不需要拖窗口 */
+    if (app->drag_area)
+        gtk_widget_set_visible(app->drag_area,
+                               !(app->layout && app->layout->hide_drag));
+
+    /* 游戏布局编辑按钮只在游戏布局下出现 */
+    if (app->game_edit_btn)
+        gtk_widget_set_visible(app->game_edit_btn, game_mode);
+
+    /* home/end 在游戏布局下没意义 */
+    if (app->home_end_box)
+        gtk_widget_set_visible(app->home_end_box, !game_mode);
+
+    /* 鼠标面板按钮：游戏布局自带触控板控件 */
+    if (app->mouse_btn)
+        gtk_widget_set_visible(app->mouse_btn, !game_mode);
+}
+
 static void app_set_layout(App *app, const LayoutOps *ops) {
     if (!app || !ops) return;
 
@@ -368,14 +399,8 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
     app->layout = ops;
     app->page   = 0;          /* 切布局时回到第一页 */
 
-    /* 全屏/游戏这类铺满屏幕的布局不需要拖动区 */
-    if (app->drag_area)
-        gtk_widget_set_visible(app->drag_area, !ops->hide_drag);
-
-    /* 游戏布局编辑按钮只在游戏布局下出现 */
-    if (app->game_edit_btn)
-        gtk_widget_set_visible(app->game_edit_btn,
-                               ops == layout_game_ops());
+    /* 顶栏里随布局变化的按钮（拖动区、编辑、home/end、鼠标面板） */
+    app_sync_toolbar_visibility(app);
 
     /* 顶栏排列方式。
      *
@@ -402,14 +427,6 @@ static void app_set_layout(App *app, const LayoutOps *ops) {
         gtk_widget_set_size_request(app->drag_area,
                                      game_mode ? 0 : -1, -1);
     }
-
-    /* home/end 在游戏布局下没意义，隐藏以腾出空间 */
-    if (app->home_end_box)
-        gtk_widget_set_visible(app->home_end_box, !game_mode);
-
-    /* 鼠标按钮同理：游戏布局下不需要触控板 */
-    if (app->mouse_btn)
-        gtk_widget_set_visible(app->mouse_btn, !game_mode);
 
     /* 切到游戏布局时把触控板弹窗关掉 —— 它置顶且不抢焦点，
      * 留在屏幕上会挡住游戏画面。 */
@@ -919,6 +936,8 @@ static GtkWidget *build_toolbar(App *app) {
     gtk_widget_set_tooltip_text(settings, "设置");
     gtk_style_context_add_class(gtk_widget_get_style_context(settings),
                                 "osk-tool");
+    gtk_style_context_add_class(gtk_widget_get_style_context(settings),
+                                "osk-compact");
     g_signal_connect(settings, "clicked",
                      G_CALLBACK(on_settings_clicked), app);
     gtk_box_pack_start(GTK_BOX(right), settings, FALSE, FALSE, 0);
@@ -930,6 +949,8 @@ static GtkWidget *build_toolbar(App *app) {
     gtk_widget_set_tooltip_text(game_edit, "编辑游戏布局");
     gtk_style_context_add_class(gtk_widget_get_style_context(game_edit),
                                 "osk-tool");
+    gtk_style_context_add_class(gtk_widget_get_style_context(game_edit),
+                                "osk-compact");
     g_signal_connect(game_edit, "clicked",
                      G_CALLBACK(on_gamepad_edit_clicked), app);
     gtk_box_pack_start(GTK_BOX(right), game_edit, FALSE, FALSE, 0);
@@ -941,6 +962,8 @@ static GtkWidget *build_toolbar(App *app) {
     gtk_widget_set_tooltip_text(minimize, "单击最小化，长按关闭键盘");
     gtk_style_context_add_class(gtk_widget_get_style_context(minimize),
                                 "osk-tool");
+    gtk_style_context_add_class(gtk_widget_get_style_context(minimize),
+                                "osk-compact");
     g_signal_connect(minimize, "clicked",
                      G_CALLBACK(on_minimize_clicked), app->window);
     /* 长按 0.6 秒关闭键盘 */
@@ -1047,6 +1070,10 @@ static void show_main_window(App *app) {
     if (!app || !app->window) return;
 
     gtk_widget_show_all(app->window);
+
+    /* 重建出来的顶栏按钮默认全可见，必须按当前布局再同步一次
+     * （否则从游戏布局切回来，编辑按钮会残留在普通布局上） */
+    app_sync_toolbar_visibility(app);
     /* show_all 之后换页按钮才真正显示，这时再同步一次它的状态 */
     update_page_button(app);
     /* 显示后再确认一次无边框（此时 GDK 窗口已创建） */
@@ -1076,16 +1103,26 @@ static const char *app_css =
     "window.osk-subwindow {"
     "  background-color: transparent;"
     "}"
-    /* 外壳：白边由 cairo 画在它的外沿，这里只给半透明底色，
-     * 让内容和桌面区分开。 */
+    /* 外壳：深色底由 CSS 提供（GTK 正常绘制），白边由
+     * on_subwin_shell_draw_after 在绘制末尾描一圈。
+     * 不要给这个控件设 app_paintable —— 那会让 GTK 跳过底色绘制。
+     *
+     * border-radius 必须与 app.c 里的 BORDER_RADIUS（10px）一致：
+     * 白边是 cairo 画的圆角线，而底色是 GTK 画的矩形 —— 若不圆角，
+     * 四个角上圆角线的外侧会露出直角的深色像素（「圆角有瑕疵」）。 */
     ".osk-subwin-shell {"
     "  background-color: rgba(30, 33, 39, 0.96);"
+    "  border-radius: 10px;"
+    "  padding: 1px;"
     "}"
-    /* 标题栏：和主窗口顶栏同一套观感 */
+    /* 标题栏：和主窗口顶栏同一套观感。
+     * 顶部两角跟着外壳圆，否则深色条会把圆角处的底色切成直角。 */
     ".osk-subwin-bar {"
     "  background-color: rgba(52, 57, 67, 0.55);"
     "  padding: 4px 6px;"
     "  border-bottom: 1px solid rgba(255,255,255,0.08);"
+    "  border-top-left-radius: 9px;"
+    "  border-top-right-radius: 9px;"
     "}"
     ".osk-subwin-title {"
     "  color: #d6dae0;"
@@ -1183,6 +1220,11 @@ static const char *app_css =
     "  box-shadow: inset 0 1px 0 rgba(255,255,255,0.10),"
     "              0 1px 2px rgba(0,0,0,0.30);"
     "  transition: background-color 80ms ease, border-color 80ms ease;"
+    "}"
+    /* 设置、编辑、最小化：缩短横向留白，保留 30px 的按钮高度。 */
+    ".osk-tool.osk-compact {"
+    "  min-width: 26px;"
+    "  padding: 0 4px;"
     "}"
     ".osk-tool:hover {"
     "  background-color: rgba(78, 87, 101, 0.80);"
@@ -1303,6 +1345,14 @@ static const char *app_css =
     ".osk-label-hint {"
     "  font-size: 9px;"
     "  color: #8f97a3;"
+    "}"
+    /* Shift 生效时把左上角的 Shift 形态加亮：
+     * 与上滑角标的 Shift 档同色（橙），表示现在按下去出的是这个符号。
+     * 2 个类的特异性压过上面 1 类的基色；按压态的 3 类规则
+     * （白底配深色字）仍然优先，不会被这条盖掉。 */
+    ".osk-label-hint.hint-current {"
+    "  color: #ffc46b;"
+    "  font-weight: bold;"
     "}"
     /* 游戏布局：按键没有上滑功能，右上角的两个角标字符纯属干扰。
      * 隐藏它们（连同左上角的 Shift 提示一起），让按键表面干净。 */
@@ -1469,7 +1519,14 @@ void app_apply_font(App *app) {
 /* ===== main ===== */
 
 int main(int argc, char **argv) {
+    g_set_prgname("osk");
     gtk_init(&argc, &argv);
+    /* 固定 Wayland app_id / X11 WM_CLASS，供首次安装的 KWin 规则匹配。 */
+    g_set_prgname("osk");
+    gdk_set_program_class("osk");
+
+    /* 必须早于 /dev/uinput 初始化；GUI 本身始终以当前用户运行。 */
+    if (!osk_first_run_setup()) return 1;
 
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css_provider, app_css, -1, NULL);

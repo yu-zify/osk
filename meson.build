@@ -15,6 +15,7 @@ executable('osk',
     'src/main.c',
     'src/app.c',
     'src/config.c',
+    'src/first_run.c',
     'src/settings.c',
     'src/backend/uinput_keyboard.c',
     'src/backend/uinput_mouse.c',
@@ -35,3 +36,10 @@ executable('osk',
   include_directories: inc,
   dependencies: [gtk_dep,m_dep],
   install: false)
+
+# 仅在用户运行 meson test 时执行；不访问设备、不提权、不改实际配置。
+first_run_test = executable('first-run-test',
+  'tests/first_run_test.c',
+  include_directories: inc,
+  dependencies: [gtk_dep])
+test('first-run-config', first_run_test)

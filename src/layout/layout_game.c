@@ -1194,8 +1194,12 @@ static void show_item_menu(EditCtx *ctx, GpItem *item, GdkEventButton *ev) {
          * 把它们放进同一个映射菜单，选中后控件会变成鼠标键。
          * （点按式滚轮已移除：滚动是连续量，点按一次只滚一格
          *   不好用，改用独立的「滚轮条」控件。） */
+        /* 菜单分隔符必须用 gtk_separator_menu_item_new()：
+         * gtk_separator_new() 返回的是 GtkSeparator，它**不是**
+         * GtkMenuItem 的子类，塞进 GtkMenuShell 会触发
+         * 「gtk_menu_shell_insert: assertion 'GTK_IS_MENU_ITEM (child)' failed」。 */
         gtk_menu_shell_append(GTK_MENU_SHELL(submenu),
-                              gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+                              gtk_separator_menu_item_new());
 
         struct { const char *label; guint code; } mouses[] = {
             { "鼠标左键", BTN_LEFT  },

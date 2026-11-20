@@ -27,6 +27,12 @@
     { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, NULL, NULL, c, \
       0, FALSE, 0, FALSE, FALSE, 0, NULL }
 
+/* 功能键 + 单档上滑：功能键不像符号键那样分 Shift 档，
+ * 所以只给一档 up/uc，up_code_shift 留 0（Shift 状态下也仍然滑出同一档）。 */
+#define K_FN_UP(id, label, c, up, uc) \
+    { id, KEY_CLASS_FUNCTION, KEY_ACTION_EMIT, label, NULL, up, NULL, c, \
+      uc, FALSE, 0, FALSE, FALSE, 0, NULL }
+
 static const KeyDef builtin_keys[] = {
     /* ===== 数字行：不支持上滑，Shift 形态显示在左上角 ===== */
     K_SYM("`",  "`", "~", KEY_GRAVE),
@@ -57,7 +63,9 @@ static const KeyDef builtin_keys[] = {
     K_FN("space",     "␣", KEY_SPACE),
     K_FN("enter",     "⏎", KEY_ENTER),
     K_FN("backspace", "⌫",  KEY_BACKSPACE),
-    K_FN("tab",       "⇥",   KEY_TAB),
+    /* Tab 上滑发 Esc：两者在同一个键位上互补（切页/切焦点 vs. 退出），
+     * 手机上单手够不着角落的 Esc 时，直接从 Tab 往上滑即可。 */
+    K_FN_UP("tab",    "⇥",   KEY_TAB, "Esc", KEY_ESC),
     K_FN("esc",       "Esc",   KEY_ESC),
     K_FN("up",    "↑", KEY_UP),
     K_FN("down",  "↓", KEY_DOWN),

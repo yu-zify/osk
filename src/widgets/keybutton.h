@@ -66,6 +66,11 @@ void          key_button_set_up_labels(KeyButton *kb,
                                        const char *up_shift,
                                        gboolean highlight_shift);
 
+/* 左上角 Shift 形态角标（符号键上的 ! @ # 之类）是否加亮。
+ * 加亮表示「Shift 已生效，现在按下去出的是这个上档符号」。
+ * 字母键没有该角标，调用无效。 */
+void          key_button_set_hint_highlight(KeyButton *kb, gboolean highlight);
+
 /* 固定按键尺寸 */
 void          key_button_set_fixed_size(KeyButton *kb, gint width, gint height);
 
