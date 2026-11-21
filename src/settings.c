@@ -14,6 +14,8 @@ typedef struct {
     GtkWidget *spin_spacing;
     GtkWidget *spin_font;
     GtkWidget *spin_corner;
+    GtkWidget *spin_pad_width;
+    GtkWidget *spin_pad_height;
     GtkWidget *lbl_opacity;
     GtkWidget *lbl_pad_opacity;
     GtkWidget *lbl_mouse_speed;
@@ -89,6 +91,25 @@ static void on_mouse_speed_changed(GtkRange *range, gpointer data) {
     ui->save_timeout = g_timeout_add(400, opacity_save_tick, ui);
 }
 
+/* 触控板区域大小。
+ *
+ * 每次改动都按两个微调框的当前值一起重设 —— 这样无论动宽还是动高，
+ * 另一个值也不会被（未同步的）旧值覆盖。
+ * 触控板弹窗开着时能直接看到区域跟着变大变小（窗口按内容自然尺寸重算）。 */
+static void on_pad_size_changed(GtkSpinButton *btn, gpointer data) {
+    (void)btn;
+    SettingsUI *ui = data;
+    if (!ui) return;
+
+    ui->app->config.pad_width  = gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(ui->spin_pad_width));
+    ui->app->config.pad_height = gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(ui->spin_pad_height));
+
+    app_apply_pad_config(ui->app);
+    persist(ui);
+}
+
 /* GtkSpinButton 的 value-changed / GtkButton 的 clicked 都走这个函数，
  * 统一按当前控件值同步 config 并重排布局。 */
 static void apply_size_from_ui(SettingsUI *ui) {
@@ -160,6 +181,10 @@ static void on_reset(GtkButton *btn, gpointer data) {
                               OSK_FONT_SIZE_DEFAULT);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_corner),
                               OSK_CORNER_FONT_SIZE_DEFAULT);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_pad_width),
+                              OSK_PAD_WIDTH_DEFAULT);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_pad_height),
+                              OSK_PAD_HEIGHT_DEFAULT);
 
     /* 上面每次 set_value 都会触发 value-changed 回调，各自落盘一次；
      * 这里再显式同步一遍，保证 config 和控件值完全一致。 */
@@ -205,21 +230,26 @@ static void settings_ui_free(gpointer data) {
 
 static void on_settings_destroy(GtkWidget *w, gpointer data) {
     App *app = data;
-    if (app && app->window)
-        g_object_set_data(G_OBJECT(app->window), "osk-settings-window", NULL);
+    if (app) {
+        /* 只清理自己的句柄：万一以后同时存在多个设置窗口，
+         * 不要在别的窗口销毁时把指针抹掉 */
+        if (app->settings_window == w)
+            app->settings_window = NULL;
+        /* 窗口关了，顶栏按钮的蓝态跟着撤销，可以再次打开 */
+        app_set_tool_selected(app->settings_btn, FALSE);
+    }
     (void)w;
 }
 
 void settings_open(App *app) {
     if (!app) return;
 
-    /* 已打开就不重复创建 */
-    GtkWidget *existing = g_object_get_data(G_OBJECT(app->window),
-                                            "osk-settings-window");
-    if (existing) {
-        gtk_window_present(GTK_WINDOW(existing));
-        return;
-    }
+    /* 已打开就什么也不做。
+     *
+     * 按钮此时是蓝态（app_set_tool_selected），表示「已经按下」——
+     * 按要求不再执行点击事件，既不重复创建，也不把窗口提到前面。
+     * 关掉设置窗口后按钮才恢复灰色，可以再次打开。 */
+    if (app->settings_window) return;
 
     SettingsUI *ui = g_new0(SettingsUI, 1);
     ui->app = app;
@@ -227,17 +257,17 @@ void settings_open(App *app) {
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     ui->window = win;
     gtk_window_set_title(GTK_WINDOW(win), "设置");
-    gtk_window_set_default_size(GTK_WINDOW(win), 420, 340);
+    gtk_window_set_default_size(GTK_WINDOW(win), 440, 470);
     gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
     gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER);
 
     /* 与主窗口一致：不要系统装饰，改用自绘白边 */
     app_setup_subwindow(win);
 
-    g_object_set_data(G_OBJECT(app->window), "osk-settings-window", win);
+    app->settings_window = win;
     g_object_set_data_full(G_OBJECT(win), "osk-settings-ui", ui,
                            settings_ui_free);
-    /* 关闭时清掉主窗口上的句柄，避免悬空指针 */
+    /* 关闭时清掉 app 上的句柄，避免悬空指针 */
     g_signal_connect(win, "destroy", G_CALLBACK(on_settings_destroy), app);
 
     /* 统一外壳：标题栏 + 拖动 + 关闭按钮 */
@@ -299,6 +329,24 @@ void settings_open(App *app) {
     gtk_box_pack_start(GTK_BOX(box),
                        make_labeled_row("指针速度",
                                          ui->scale_mouse_speed, lbl_speed),
+                       FALSE, FALSE, 0);
+
+    /* --- 触控板区域大小 ---
+     * 只影响弹窗里那块可拖动区域；游戏布局内置的触控板由布局自己的
+     * 画布坐标决定，不跟这里联动。 */
+    ui->spin_pad_width = make_spin(OSK_PAD_WIDTH_MIN, OSK_PAD_WIDTH_MAX, 10,
+                                    app->config.pad_width);
+    ui->spin_pad_height = make_spin(OSK_PAD_HEIGHT_MIN, OSK_PAD_HEIGHT_MAX, 10,
+                                     app->config.pad_height);
+    g_signal_connect(ui->spin_pad_width, "value-changed",
+                     G_CALLBACK(on_pad_size_changed), ui);
+    g_signal_connect(ui->spin_pad_height, "value-changed",
+                     G_CALLBACK(on_pad_size_changed), ui);
+    gtk_box_pack_start(GTK_BOX(box),
+                       make_labeled_row("触控板宽", ui->spin_pad_width, NULL),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box),
+                       make_labeled_row("触控板高", ui->spin_pad_height, NULL),
                        FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(box),
@@ -379,4 +427,7 @@ void settings_open(App *app) {
     }
 
     gtk_widget_show_all(win);
+
+    /* 打开成功才转蓝：蓝 = 已打开，再点不做任何事 */
+    app_set_tool_selected(app->settings_btn, TRUE);
 }

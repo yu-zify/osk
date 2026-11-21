@@ -152,11 +152,44 @@ void app_apply_config(App *app) {
     gtk_widget_set_opacity(app->window, app->config.opacity);
 }
 
-/* 触控板窗口的透明度。它是独立窗口，所以和主窗口分开设置 ——
+/* 触控板窗口的透明度与区域尺寸。它是独立窗口，所以和主窗口分开设置 ——
  * 键盘通常要看得清，触控板往往希望更透以免挡视线。 */
 void app_apply_pad_config(App *app) {
     if (!app || !app->mouse_panel) return;
     gtk_widget_set_opacity(app->mouse_panel, app->config.pad_opacity);
+
+    if (!app->mouse_pad_area) return;
+
+    /* 区域尺寸：改一下微调框、弹窗开着时立刻跟着变 */
+    gtk_widget_set_size_request(app->mouse_pad_area,
+                                app->config.pad_width,
+                                app->config.pad_height);
+
+    /* 窗口尺寸跟着内容走。
+     *
+     * 不用 gtk_window_resize(win, 1, 1) 那个「缩到最小」的偏方：
+     * 部分合成器/窗口管理器不会主动收缩。这里直接取外壳的
+     * preferred size —— 触控板区域有显式尺寸请求，取出来就是
+     * 用户配置的宽高加上标题栏、边距和三键那一行。 */
+    GtkWidget *shell = gtk_bin_get_child(GTK_BIN(app->mouse_panel));
+    if (shell) {
+        GtkRequisition nat;
+        gtk_widget_get_preferred_size(shell, NULL, &nat);
+        gtk_window_resize(GTK_WINDOW(app->mouse_panel),
+                          MAX(nat.width, 1), MAX(nat.height, 1));
+    }
+}
+
+/* 顶栏按钮的蓝态。用类而不是直接改 CSS property：
+ * 状态切换频繁，走样式类不会破坏主题，也和修饰键的 mod-oneshot 同一套做法。 */
+void app_set_tool_selected(GtkWidget *btn, gboolean selected) {
+    if (!btn) return;
+
+    GtkStyleContext *ctx = gtk_widget_get_style_context(btn);
+    if (selected)
+        gtk_style_context_add_class(ctx, "osk-selected");
+    else
+        gtk_style_context_remove_class(ctx, "osk-selected");
 }
 
 /* 强制窗口走客户端装饰（CSD）。

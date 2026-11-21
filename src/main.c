@@ -557,30 +557,204 @@ static void on_settings_clicked(GtkButton *btn, gpointer data) {
  *   - 关闭时清掉 app 上的句柄，再次点击按钮会重新创建
  */
 
-/* 鼠标按键的上下文：哪个设备、哪个键。
- * 原来定义在 layout_touchpad.c 里，那个文件删掉后搬到这里。 */
-typedef struct {
-    OskMouse *mouse;
-    guint     button;
-} MouseBtnCtx;
+/* ===== 触控板弹窗里的左中右三键 =====
+ *
+ * 与游戏布局的鼠标键同一套语义：按下立刻注入 BTN down 并保持，
+ * 按住期间移动手指 = 指针移动（按键一直按住），松手才注入 BTN up ——
+ * 也就是「按住拖动」。普通 GtkButton 的 pressed/released 拿不到逐帧位移，
+ * 做不了拖拽；KeyButton 的 HOLD 模式 + hold_drag 回调正是为此准备的。
+ *
+ * KeyDef 必须是静态的：KeyButton 只保存指针，不复制内容，生命周期
+ * 必须长于控件。 */
 
-static void on_mouse_btn_pressed(GtkButton *btn, gpointer data) {
-    (void)btn;
-    MouseBtnCtx *ctx = data;
-    if (ctx && ctx->mouse)
-        osk_mouse_button(ctx->mouse, ctx->button, TRUE);
+typedef struct {
+    App      *app;
+    guint     code;
+    gboolean  held;             /* 已注入按下、尚未释放 */
+    gdouble   accum_x, accum_y; /* 小数累积，凑整后按整数像素注入 */
+} PadMouseCtx;
+
+static const KeyDef PAD_KEY_LEFT = {
+    .id = "pad-left", .klass = KEY_CLASS_FUNCTION,
+    .action = KEY_ACTION_MOUSE_BTN, .label = "左键", .code = BTN_LEFT,
+};
+static const KeyDef PAD_KEY_MIDDLE = {
+    .id = "pad-middle", .klass = KEY_CLASS_FUNCTION,
+    .action = KEY_ACTION_MOUSE_BTN, .label = "中键", .code = BTN_MIDDLE,
+};
+static const KeyDef PAD_KEY_RIGHT = {
+    .id = "pad-right", .klass = KEY_CLASS_FUNCTION,
+    .action = KEY_ACTION_MOUSE_BTN, .label = "右键", .code = BTN_RIGHT,
+};
+
+static void pad_mouse_press(const KeyDef *def, gpointer user_data) {
+    PadMouseCtx *ctx = user_data;
+    (void)def;
+    if (!ctx || !ctx->app || !ctx->app->mouse) return;
+
+    ctx->held    = TRUE;
+    ctx->accum_x = ctx->accum_y = 0.0;
+    osk_mouse_button(ctx->app->mouse, ctx->code, TRUE);
 }
 
-static void on_mouse_btn_released(GtkButton *btn, gpointer data) {
-    (void)btn;
-    MouseBtnCtx *ctx = data;
-    if (ctx && ctx->mouse)
-        osk_mouse_button(ctx->mouse, ctx->button, FALSE);
+static void pad_mouse_release(const KeyDef *def, gpointer user_data) {
+    PadMouseCtx *ctx = user_data;
+    (void)def;
+    if (!ctx || !ctx->app || !ctx->app->mouse) return;
+
+    ctx->held = FALSE;
+    osk_mouse_button(ctx->app->mouse, ctx->code, FALSE);
+}
+
+/* 控件被销毁时如果还按着，补一次释放。
+ *
+ * 场景：一只手指按住左键拖动，另一只手指点了窗口右上角的关闭按钮 ——
+ * 弹窗销毁，按住的那个手势不会再有 release 回调，uinput 里的 BTN_LEFT
+ * 就永远停在按下状态。游戏布局退出时有 layout_game_release_all 兜底，
+ * 这里同理。ctx 在 "destroy" 信号时仍然有效（数据在 finalize 才释放）。 */
+static void on_pad_key_destroy(GtkWidget *w, gpointer data) {
+    PadMouseCtx *ctx = data;
+    (void)w;
+    if (ctx && ctx->held && ctx->app && ctx->app->mouse) {
+        ctx->held = FALSE;
+        osk_mouse_button(ctx->app->mouse, ctx->code, FALSE);
+    }
+}
+
+/* ===== 三键的图案 =====
+ *
+ * 画一只俯视鼠标：圆角矩形机身，上半部分被中线分成左右键，中间是滚轮。
+ * 这颗键对应的区域填成亮蓝色 —— 比写「左键 / 中键 / 右键」更直观，
+ * 也和界面上其它蓝色高亮（上滑档、修饰键）是同一套语义。
+ *
+ * 所有尺寸都按传入的 w/h 现算，不写死像素：键被拉宽、系统 DPI 变化时
+ * 图案保持比例。 */
+
+static void paint_rounded_rect(cairo_t *cr, gdouble x, gdouble y,
+                                gdouble w, gdouble h, gdouble r) {
+    if (r > MIN(w, h) / 2.0) r = MIN(w, h) / 2.0;
+    if (r < 0) r = 0;
+
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r,     r, -G_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0,          G_PI / 2);
+    cairo_arc(cr, x + r,     y + h - r, r, G_PI / 2,   G_PI);
+    cairo_arc(cr, x + r,     y + r,     r, G_PI,       3 * G_PI / 2);
+    cairo_close_path(cr);
+}
+
+static void pad_mouse_paint(cairo_t *cr, gint w, gint h, gpointer user_data) {
+    guint code = GPOINTER_TO_UINT(user_data);
+
+    /* 机身：高不超过 34px，宽约为高的 0.72 —— 比真实鼠标略宽一点，
+     * 按键区（左/中/右）才有足够的面积让人一眼看出是哪颗 */
+    gdouble bh = MIN((gdouble)h - 8.0, 34.0);
+    if (bh < 12.0) bh = 12.0;
+    gdouble bw = bh * 0.72;
+    if (bw > (gdouble)w - 8.0) bw = MAX((gdouble)w - 8.0, 8.0);
+    if (bw < 8.0) bw = 8.0;
+
+    gdouble x = ((gdouble)w - bw) / 2.0;
+    gdouble y = ((gdouble)h - bh) / 2.0;
+
+    gdouble line_h  = bh * 0.42;              /* 按键区高度 */
+    /* 上半部分按真实鼠标分成三段：左键 / 滚轮（中键）/ 右键 */
+    gdouble x1 = x + bw * 0.38;
+    gdouble x2 = x + bw * 0.62;
+    gdouble wheel_w = MAX(MIN(x2 - x1 - 1.0, bw * 0.22), 2.5);
+    gdouble wheel_h = line_h * 0.62;
+    gdouble wheel_x = x + bw / 2.0 - wheel_w / 2.0;
+    gdouble wheel_y = y + (line_h - wheel_h) / 2.0;
+
+    /* --- 1. 当前键的高亮：填亮蓝，裁在机身圆角内 --- */
+    cairo_save(cr);
+    paint_rounded_rect(cr, x, y, bw, bh, bw * 0.42);
+    cairo_clip(cr);
+
+    cairo_set_source_rgba(cr, 0.50, 0.83, 1.0, 0.92);
+    if (code == BTN_LEFT) {
+        cairo_rectangle(cr, x, y, x1 - x, line_h);
+        cairo_fill(cr);
+    } else if (code == BTN_RIGHT) {
+        cairo_rectangle(cr, x2, y, x + bw - x2, line_h);
+        cairo_fill(cr);
+    } else {
+        cairo_rectangle(cr, x1, y, x2 - x1, line_h);
+        cairo_fill(cr);
+    }
+    cairo_restore(cr);
+
+    /* --- 2. 机身轮廓 --- */
+    cairo_set_source_rgba(cr, 0.84, 0.88, 0.93, 0.95);
+    cairo_set_line_width(cr, 1.2);
+    paint_rounded_rect(cr, x + 0.6, y + 0.6, bw - 1.2, bh - 1.2, bw * 0.42);
+    cairo_stroke(cr);
+
+    /* --- 3. 按键分隔线（横向分界 + 左右键两条竖线） --- */
+    cairo_save(cr);
+    paint_rounded_rect(cr, x, y, bw, bh, bw * 0.42);
+    cairo_clip(cr);
+    cairo_set_line_width(cr, 1.0);
+    cairo_move_to(cr, x, y + line_h);
+    cairo_line_to(cr, x + bw, y + line_h);
+    cairo_move_to(cr, x1, y);
+    cairo_line_to(cr, x1, y + line_h);
+    cairo_move_to(cr, x2, y);
+    cairo_line_to(cr, x2, y + line_h);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+
+    /* --- 4. 滚轮：中键选中时已被蓝色填满，再描一圈深蓝收边 --- */
+    paint_rounded_rect(cr, wheel_x, wheel_y, wheel_w, wheel_h,
+                       wheel_w / 2.0);
+    cairo_set_line_width(cr, 1.0);
+    if (code == BTN_MIDDLE)
+        cairo_set_source_rgba(cr, 0.20, 0.45, 0.75, 0.95);
+    else
+        cairo_set_source_rgba(cr, 0.84, 0.88, 0.93, 0.90);
+    cairo_stroke(cr);
+}
+
+static void pad_mouse_drag(const KeyDef *def, gdouble dx, gdouble dy,
+                            gpointer user_data) {
+    PadMouseCtx *ctx = user_data;
+    gdouble speed;
+    gint ix, iy;
+
+    (void)def;
+    if (!ctx || !ctx->app || !ctx->app->mouse || !ctx->held) return;
+
+    /* 速度与触控板、游戏布局鼠标键共用设置里的「指针速度」 */
+    speed = ctx->app->config.mouse_speed;
+    if (speed < OSK_MOUSE_SPEED_MIN || speed > OSK_MOUSE_SPEED_MAX)
+        speed = OSK_MOUSE_SPEED_DEFAULT;
+
+    ctx->accum_x += dx * speed;
+    ctx->accum_y += dy * speed;
+
+    ix = (gint)ctx->accum_x;
+    iy = (gint)ctx->accum_y;
+    if (ix == 0 && iy == 0) return;
+
+    ctx->accum_x -= ix;
+    ctx->accum_y -= iy;
+
+    osk_mouse_move_rel(ctx->app->mouse, ix, iy);
+
+    /* 和触控板一样维护光标位置跟踪（点击穿透挖洞的数据来源） */
+    layout_note_cursor_move(ctx->app, ix, iy);
 }
 
 static void on_mouse_panel_destroy(GtkWidget *w, gpointer data) {
     App *app = data;
-    if (app) app->mouse_panel = NULL;
+    if (app) {
+        app->mouse_panel = NULL;
+        /* 触控板区域是弹窗的子控件，随窗口一起销毁 ——
+         * 不置空就是悬空指针，设置面板改尺寸时会踩到它 */
+        app->mouse_pad_area = NULL;
+        /* 窗口关了，蓝态跟着撤销，按钮可以再次打开 */
+        app_set_tool_selected(app->mouse_btn, FALSE);
+    }
     (void)w;
 }
 
@@ -589,17 +763,20 @@ static void on_mouse_panel_clicked(GtkButton *btn, gpointer data) {
     App *app = data;
     if (!app) return;
 
-    /* 已打开就提到前面，不重复创建 */
-    if (app->mouse_panel) {
-        gtk_window_present(GTK_WINDOW(app->mouse_panel));
-        return;
-    }
+    /* 已打开就什么也不做。
+     *
+     * 按钮此时是蓝态（app_set_tool_selected），表示「已经按下」——
+     * 按要求不再执行点击事件，既不重复创建，也不把窗口提到前面。
+     * 关掉弹窗（它自己的 ✕）后按钮才恢复灰色，可以再次打开。 */
+    if (app->mouse_panel) return;
 
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     app->mouse_panel = win;
 
     gtk_window_set_title(GTK_WINDOW(win), "触控板");
-    gtk_window_set_default_size(GTK_WINDOW(win), 420, 300);
+    /* 不设默认尺寸：窗口映射时按内容自然尺寸打开，尺寸完全由配置里的
+     * 触控板宽高决定（见下面触控板区域的 set_size_request），
+     * 这样不会先按某个写死的尺寸显示再跳到配置尺寸。 */
     gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
 
     /* 不抢焦点：点触控板时不能把当前应用的输入焦点弄丢 */
@@ -617,49 +794,69 @@ static void on_mouse_panel_clicked(GtkButton *btn, gpointer data) {
     gtk_container_set_border_width(GTK_CONTAINER(box), 6);
     gtk_box_pack_start(GTK_BOX(content), box, TRUE, TRUE, 0);
 
-    /* 触控板区域 */
+    /* 触控板区域。尺寸不在这里写死 —— 打开时按配置里的
+     * pad_width/pad_height 定，之后改设置也会实时跟着变。
+     * 这里先设一次尺寸请求：窗口没有默认尺寸，映射时就是按
+     * 内容自然尺寸打开，必须提前把宽高定下来。
+     * 指针存到 app 上，正是为了「设置里改完立即生效」那条路径。 */
     TouchpadWidget *tw = touchpad_widget_new(app->mouse, app);
     GtkWidget *area = touchpad_widget_gtk(tw);
-    gtk_widget_set_size_request(area, -1, 200);
+    app->mouse_pad_area = area;
+    gtk_widget_set_size_request(area,
+                                app->config.pad_width, app->config.pad_height);
     gtk_box_pack_start(GTK_BOX(box), area, TRUE, TRUE, 0);
 
-    /* 左中右三键：按住持续生效，所以用 pressed/released 而不是 clicked */
+    /* 左中右三键：KeyButton 的 HOLD 模式。
+     * 按住 = 注入按下并保持，按住移动手指 = 拖动指针，松手才释放。 */
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
 
-    struct { const char *label; guint code; } btns[] = {
-        { "左键", BTN_LEFT   },
-        { "中键", BTN_MIDDLE },
-        { "右键", BTN_RIGHT  },
+    static const KeyDef *const pad_defs[] = {
+        &PAD_KEY_LEFT, &PAD_KEY_MIDDLE, &PAD_KEY_RIGHT
     };
 
-    for (gsize i = 0; i < G_N_ELEMENTS(btns); ++i) {
-        GtkWidget *b = gtk_button_new_with_label(btns[i].label);
-        gtk_widget_set_can_focus(b, FALSE);
-        gtk_widget_set_focus_on_click(b, FALSE);
-        gtk_widget_set_size_request(b, -1, 42);
-        gtk_style_context_add_class(gtk_widget_get_style_context(b), "osk-tool");
+    for (gsize i = 0; i < G_N_ELEMENTS(pad_defs); ++i) {
+        const KeyDef *def = pad_defs[i];
 
-        MouseBtnCtx *ctx = g_new0(MouseBtnCtx, 1);
-        ctx->mouse  = app->mouse;
-        ctx->button = btns[i].code;
-        g_object_set_data_full(G_OBJECT(b), "osk-mbtnctx", ctx, g_free);
+        PadMouseCtx *ctx = g_new0(PadMouseCtx, 1);
+        ctx->app  = app;
+        ctx->code = def->code;
 
-        g_signal_connect(b, "pressed",
-                         G_CALLBACK(on_mouse_btn_pressed),  ctx);
-        g_signal_connect(b, "released",
-                         G_CALLBACK(on_mouse_btn_released), ctx);
+        KeyButton *kb = key_button_new(def, NULL, NULL, ctx);
+        key_button_set_fixed_size(kb, -1, 42);
+        /* 三键等分整行宽度（固定尺寸只给了高度） */
+        gtk_widget_set_hexpand(key_button_widget(kb), TRUE);
+        key_button_set_hold_mode(kb, pad_mouse_press, pad_mouse_release);
+        key_button_set_hold_drag(kb, pad_mouse_drag);
 
-        gtk_box_pack_start(GTK_BOX(row), b, TRUE, TRUE, 0);
+        /* 图案代替文字：画鼠标图标，被按的那颗键用亮蓝标出。
+         * 文字标签仍保留在 KeyDef 里（设置/提示用），只是不显示。 */
+        key_button_set_painter(kb, pad_mouse_paint,
+                                GUINT_TO_POINTER((guint)def->code));
+        gtk_widget_set_tooltip_text(key_button_widget(kb), def->label);
+
+        /* ctx 跟着控件销毁；hold 回调只可能在控件存活期间触发 */
+        g_object_set_data_full(G_OBJECT(key_button_widget(kb)),
+                               "osk-padctx", ctx, g_free);
+        g_signal_connect(key_button_widget(kb), "destroy",
+                         G_CALLBACK(on_pad_key_destroy), ctx);
+
+        gtk_box_pack_start(GTK_BOX(row), key_button_widget(kb),
+                           TRUE, TRUE, 0);
     }
     gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
 
     /* 内容就位后再挂白边 */
     app_finish_subwindow(win);
 
-    /* 应用用户配置的触控板透明度 */
+    gtk_widget_show_all(win);
+
+    /* 应用用户配置的触控板透明度与区域尺寸。
+     * 放在 show_all 之后：窗口已实现，resize 按内容自然尺寸生效，
+     * 之后设置里改尺寸也走同一个函数。 */
     app_apply_pad_config(app);
 
-    gtk_widget_show_all(win);
+    /* 打开成功才转蓝：蓝 = 已打开，再点不做任何事 */
+    app_set_tool_selected(app->mouse_btn, TRUE);
 }
 
 /* 游戏布局编辑按钮：直接切换编辑模式，不弹面板。
@@ -748,6 +945,12 @@ static void attach_long_press(GtkWidget *widget, gpointer window) {
 
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     (void)widget; (void)user_data;
+
+    /* 顶栏按钮随主窗口一起析构，先清掉指针：
+     * 退出时若设置/触控板窗口随后销毁，它们的回调里会再碰这两个
+     * 按钮（app_set_tool_selected），此时不能再指向已释放的控件。 */
+    g_app.settings_btn = NULL;
+    g_app.mouse_btn    = NULL;
 
     /* 先把还按着的键和摇杆放掉，再销毁设备 */
     layout_game_release_all(&g_app);
@@ -872,6 +1075,8 @@ static GtkWidget *build_toolbar(App *app) {
                      G_CALLBACK(on_mouse_panel_clicked), app);
     gtk_box_pack_start(GTK_BOX(bar), mouse_btn, FALSE, FALSE, 0);
     app->mouse_btn = mouse_btn;
+    /* 主窗口重建时弹窗可能还开着 —— 按实际状态恢复蓝态 */
+    app_set_tool_selected(mouse_btn, app->mouse_panel != NULL);
 
     /* --- 中间：拖动区（只放一个移动符号，尽量省空间） --- */
     GtkWidget *drag_area = gtk_event_box_new();
@@ -941,6 +1146,9 @@ static GtkWidget *build_toolbar(App *app) {
     g_signal_connect(settings, "clicked",
                      G_CALLBACK(on_settings_clicked), app);
     gtk_box_pack_start(GTK_BOX(right), settings, FALSE, FALSE, 0);
+    app->settings_btn = settings;
+    /* 主窗口重建时设置窗口可能还开着 —— 按实际状态恢复蓝态 */
+    app_set_tool_selected(settings, app->settings_window != NULL);
 
     /* 游戏布局编辑：只在游戏布局下显示，避免顶栏常驻一个无关按钮 */
     GtkWidget *game_edit = gtk_button_new_with_label("✎");
@@ -1397,6 +1605,15 @@ static const char *app_css =
     ".osk-tool.osk-locked {"
     "  background-color: #c9873c;"
     "  border-color: #ffc46b;"
+    "  color: #ffffff;"
+    "}"
+    /* 顶栏按钮的「已打开」蓝态（鼠标、设置）。
+     * 位置必须在 :hover / :active 之后：同特异性（2 个）时后写的赢。
+     * 这样按钮处于蓝态时，悬停和再次按下都不会把它变回灰色 ——
+     * 蓝色就是「已经按下、再点不执行」的视觉状态。 */
+    ".osk-tool.osk-selected {"
+    "  background-color: #2f6fd0;"
+    "  border-color: #5b9bf0;"
     "  color: #ffffff;"
     "}"
     ".osk-key.osk-transparent-key {"

@@ -19,6 +19,8 @@
  *   opacity=1.0
  *   font_size=28
  *   corner_font_size=12
+ *   pad_width=380
+ *   pad_height=200
  */
 
 #define GROUP_APPEARANCE "appearance"
@@ -29,6 +31,8 @@
 #define KEY_OPACITY      "opacity"
 #define KEY_PAD_OPACITY  "pad_opacity"
 #define KEY_MOUSE_SPEED  "mouse_speed"
+#define KEY_PAD_WIDTH    "pad_width"
+#define KEY_PAD_HEIGHT   "pad_height"
 #define KEY_FONT_SIZE    "font_size"
 #define KEY_CORNER_SIZE  "corner_font_size"
 
@@ -49,6 +53,8 @@ void config_set_defaults(OskConfig *cfg) {
     cfg->opacity          = OSK_OPACITY_DEFAULT;
     cfg->pad_opacity      = OSK_OPACITY_DEFAULT;
     cfg->mouse_speed      = OSK_MOUSE_SPEED_DEFAULT;
+    cfg->pad_width        = OSK_PAD_WIDTH_DEFAULT;
+    cfg->pad_height       = OSK_PAD_HEIGHT_DEFAULT;
     cfg->font_size        = OSK_FONT_SIZE_DEFAULT;
     cfg->corner_font_size = OSK_CORNER_FONT_SIZE_DEFAULT;
 }
@@ -83,6 +89,11 @@ static void sanitize(OskConfig *cfg) {
         cfg->mouse_speed = OSK_MOUSE_SPEED_DEFAULT;
     cfg->mouse_speed = CLAMP(cfg->mouse_speed,
                               OSK_MOUSE_SPEED_MIN, OSK_MOUSE_SPEED_MAX);
+
+    cfg->pad_width = CLAMP(cfg->pad_width,
+                           OSK_PAD_WIDTH_MIN, OSK_PAD_WIDTH_MAX);
+    cfg->pad_height = CLAMP(cfg->pad_height,
+                            OSK_PAD_HEIGHT_MIN, OSK_PAD_HEIGHT_MAX);
 }
 
 /* 读一个整数键；键不存在或不是整数时保留原值（即默认值）。 */
@@ -135,6 +146,8 @@ gboolean config_load(OskConfig *cfg) {
     read_double(kf, KEY_OPACITY,  &cfg->opacity);
     read_double(kf, KEY_PAD_OPACITY, &cfg->pad_opacity);
     read_double(kf, KEY_MOUSE_SPEED, &cfg->mouse_speed);
+    read_int(kf, KEY_PAD_WIDTH,   &cfg->pad_width);
+    read_int(kf, KEY_PAD_HEIGHT,  &cfg->pad_height);
 
     g_key_file_free(kf);
 
@@ -212,6 +225,8 @@ static void write_appearance(GKeyFile *kf, const OskConfig *cfg) {
                             c.pad_opacity);
     g_key_file_set_double (kf, GROUP_APPEARANCE, KEY_MOUSE_SPEED,
                             c.mouse_speed);
+    g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_PAD_WIDTH, c.pad_width);
+    g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_PAD_HEIGHT, c.pad_height);
     g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_FONT_SIZE, c.font_size);
     g_key_file_set_integer(kf, GROUP_APPEARANCE, KEY_CORNER_SIZE,
                            c.corner_font_size);

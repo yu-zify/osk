@@ -22,6 +22,10 @@ struct _KeyButton {
     gboolean fired;           /* 本次按下是否已经发过普通键 */
     gboolean swipe_triggered;
 
+    /* 自定义图案：非 NULL 时替代中间的文字标签（见 keybutton.h） */
+    KeyButtonPaintFunc painter;
+    gpointer           painter_data;
+
     /* —— HOLD 模式（游戏布局用）——
      * hold_mode 为真时走「按下即按住、松手才释放」的路径，
      * 不触发连发、不响应上滑。 */
@@ -289,6 +293,45 @@ static void key_button_free(gpointer data) {
     g_free(kb);
 }
 
+/* ===== 自定义图案 ===== */
+
+/* 图案画在按键壳的最上层：connect_after 保证在 GTK 画完
+ * CSS 底色/边框和子控件（角标）之后再落笔。 */
+static gboolean on_button_draw_after(GtkWidget *w, cairo_t *cr,
+                                     gpointer data) {
+    KeyButton *kb = data;
+    if (!kb || !kb->painter) return FALSE;
+
+    GtkAllocation a;
+    gtk_widget_get_allocation(w, &a);
+    if (a.width <= 0 || a.height <= 0) return FALSE;
+
+    cairo_save(cr);
+    kb->painter(cr, a.width, a.height, kb->painter_data);
+    cairo_restore(cr);
+    return FALSE;
+}
+
+void key_button_set_painter(KeyButton *kb, KeyButtonPaintFunc painter,
+                             gpointer user_data) {
+    if (!kb) return;
+
+    kb->painter      = painter;
+    kb->painter_data = user_data;
+
+    /* 图案与文字二选一：设了图案就把主标签藏起来，避免叠字。
+     *
+     * 必须同时置 no_show_all —— 只 hide 的话，之后任何一次
+     * gtk_widget_show_all()（比如窗口创建时）都会把它重新显示出来，
+     * 图案下面就会透出「左键」两个字。角标标签也是同样的处理。 */
+    if (!kb->label_main) return;
+    gtk_widget_set_no_show_all(kb->label_main, painter != NULL);
+    if (painter)
+        gtk_widget_hide(kb->label_main);
+    else
+        gtk_widget_show(kb->label_main);
+}
+
 /* ===== 构造 ===== */
 
 KeyButton *key_button_new(const KeyDef *def,
@@ -372,6 +415,10 @@ KeyButton *key_button_new(const KeyDef *def,
     g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update),    kb);
     g_object_set_data_full(G_OBJECT(kb->button), "osk-drag",
                            drag, g_object_unref);
+
+    /* 自定义图案的绘制钩子（图案键用；未设 painter 时回调直接返回） */
+    g_signal_connect_after(kb->button, "draw",
+                            G_CALLBACK(on_button_draw_after), kb);
 
     /* ---- 4. 生命周期管理 ---- */
     g_object_set_data_full(G_OBJECT(kb->button), "osk-keybutton",

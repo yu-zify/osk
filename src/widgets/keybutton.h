@@ -71,6 +71,21 @@ void          key_button_set_up_labels(KeyButton *kb,
  * 字母键没有该角标，调用无效。 */
 void          key_button_set_hint_highlight(KeyButton *kb, gboolean highlight);
 
+/* 自定义图案（painter）。
+ *
+ * 设置后中间的文字主标签隐藏，改由 painter 在按键壳上绘制。
+ * 坐标原点是按键壳左上角，w/h 是当前分配尺寸 —— 图案必须按尺寸缩放，
+ * 不能写死像素，这样键宽、字号、DPI 变化都不会变形。
+ * 传 NULL 恢复文字标签。
+ *
+ * 用于触控板弹窗的左中右三键：画鼠标图标比写「左键/中键/右键」直观。 */
+typedef void (*KeyButtonPaintFunc)(cairo_t *cr, gint w, gint h,
+                                    gpointer user_data);
+
+void          key_button_set_painter(KeyButton *kb,
+                                      KeyButtonPaintFunc painter,
+                                      gpointer user_data);
+
 /* 固定按键尺寸 */
 void          key_button_set_fixed_size(KeyButton *kb, gint width, gint height);
 

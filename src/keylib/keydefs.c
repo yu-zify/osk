@@ -62,7 +62,9 @@ static const KeyDef builtin_keys[] = {
     /* ===== 功能键 ===== */
     K_FN("space",     "␣", KEY_SPACE),
     K_FN("enter",     "⏎", KEY_ENTER),
-    K_FN("backspace", "⌫",  KEY_BACKSPACE),
+    /* Backspace 上滑发 Delete：物理键盘上这两个键相邻且职责互补
+     * （删前一个字符 / 删后一个字符），触屏上用一颗键覆盖两种删除。 */
+    K_FN_UP("backspace", "⌫", KEY_BACKSPACE, "Del", KEY_DELETE),
     /* Tab 上滑发 Esc：两者在同一个键位上互补（切页/切焦点 vs. 退出），
      * 手机上单手够不着角落的 Esc 时，直接从 Tab 往上滑即可。 */
     K_FN_UP("tab",    "⇥",   KEY_TAB, "Esc", KEY_ESC),

@@ -43,6 +43,8 @@ typedef struct {
     gdouble opacity;          /* 键盘整体不透明度 0.2 ~ 1.0 */
     gdouble pad_opacity;      /* 触控板窗口不透明度 0.2 ~ 1.0 */
     gdouble mouse_speed;      /* 触控板指针移动倍率 0.2 ~ 4.0 */
+    gint    pad_width;        /* 触控板区域宽度（像素） */
+    gint    pad_height;       /* 触控板区域高度（像素） */
     gint    font_size;        /* 按键主标签字号（像素） */
     gint    corner_font_size; /* 右上角上滑字符字号（像素） */
 } OskConfig;
@@ -75,6 +77,19 @@ typedef struct {
 #define OSK_MOUSE_SPEED_DEFAULT       1.0
 #define OSK_MOUSE_SPEED_MIN           0.2
 #define OSK_MOUSE_SPEED_MAX           4.0
+
+/* 触控板区域大小（像素）。
+ *
+ * 只控制弹窗里那块可拖动区域，不影响游戏布局内置的触控板
+ * （那个的尺寸由游戏布局自己的画布坐标决定）。
+ * 默认值接近旧版的 420x300 弹窗：内容区 380 宽 + 左右各 6px 边距，
+ * 高度 200 再叠加标题栏与三键那一行。 */
+#define OSK_PAD_WIDTH_DEFAULT       380
+#define OSK_PAD_HEIGHT_DEFAULT      200
+#define OSK_PAD_WIDTH_MIN           120
+#define OSK_PAD_WIDTH_MAX          1200
+#define OSK_PAD_HEIGHT_MIN           60
+#define OSK_PAD_HEIGHT_MAX          900
 
 /* 具名标签：其他头文件（如 touchpad.h）需要前向声明 App 时
  * 用 struct _App，与这里的定义保持一致。 */
@@ -116,6 +131,13 @@ typedef struct _App {
     /* 触控板弹窗与它的按钮。触控板不再是布局，改为独立窗口。 */
     GtkWidget       *mouse_btn;     /* 顶栏的鼠标按钮，游戏布局下隐藏 */
     GtkWidget       *mouse_panel;   /* 弹窗，NULL 表示没打开 */
+    GtkWidget       *mouse_pad_area;/* 弹窗里的触控板区域，用于应用尺寸配置 */
+
+    /* 设置窗口与它的顶栏按钮。
+     * 以前窗口指针挂在 main window 的 g_object data 上，主窗口重建
+     * （切全屏布局）时会丢，导致设置窗口变成孤儿；改用字段保存。 */
+    GtkWidget       *settings_btn;
+    GtkWidget       *settings_window; /* NULL 表示没打开 */
 
     const LayoutOps *layout;
 
@@ -145,6 +167,14 @@ void app_apply_config(App *app);
 
 /* 应用触控板窗口的透明度。触控板是独立窗口，单独控制。 */
 void app_apply_pad_config(App *app);
+
+/* 顶栏按钮的「已打开」蓝态（鼠标、设置两个按钮用）。
+ *
+ * 蓝色表示对应窗口已经打开、按钮处于「已经按下」的状态；
+ * 此时再点不再执行任何动作（见 main.c 的 on_mouse_panel_clicked 与
+ * settings.c 的 settings_open）。窗口关闭时传 FALSE 恢复。
+ * 换主窗口重建顶栏时会按窗口是否存在重新同步。 */
+void app_set_tool_selected(GtkWidget *btn, gboolean selected);
 
 /* 统一设置子窗口外观：去掉系统装饰 + 加自绘白边。
  *
